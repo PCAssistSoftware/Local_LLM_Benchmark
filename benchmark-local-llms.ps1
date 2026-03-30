@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Benchmarks local LLMs using Ollama and/or LM Studio CLI.
 
@@ -47,7 +47,7 @@ param(
     [ValidateRange(1, 100)]
     [int]$Repeats = 2,
 
-    [int]$TimeoutSec = 120,
+    [int]$TimeoutSec = 180,
 
     [string]$OutputDir = ".\results",
 
@@ -635,6 +635,26 @@ function Get-InstalledOllamaModels {
     }
 }
 
+function Unload-OllamaModel {
+    param(
+        [string]$BaseUrl,
+        [string]$Model
+    )
+
+    $body = @{
+        model      = $Model
+        keep_alive = 0
+    } | ConvertTo-Json -Depth 5
+
+    try {
+        Invoke-RestMethod -Uri "$BaseUrl/api/generate" -Method Post -ContentType "application/json" -Body $body | Out-Null
+        Write-Host ("Unloaded Ollama model: {0}" -f $Model) -ForegroundColor DarkGray
+    }
+    catch {
+        Write-Warning ("Failed to unload Ollama model '{0}': {1}" -f $Model, $_.Exception.Message)
+    }
+}
+
 function Invoke-OllamaUnload {
     param([string]$BaseUrl, [string]$Model)
 
@@ -739,6 +759,19 @@ function Invoke-OllamaBenchmark {
     catch {
         $sw.Stop()
 
+        $msg = $_.Exception.Message
+        if ([string]::IsNullOrWhiteSpace($msg)) {
+            $msg = "Unknown Ollama error."
+        }
+
+        if ($msg -match '500\)\s*Internal Server Error') {
+            $msg += " Possible causes: insufficient available RAM/VRAM, model load failure, or Ollama runtime instability. Check whether other large models are still loaded, free memory, or rerun the model individually."
+        }
+
+        if ($msg -match '(?i)requires more system memory|insufficient memory|out of memory|not enough memory') {
+            $msg += " Memory-related Ollama failure detected. Try unloading other models, restarting Ollama, closing LM Studio, or benchmarking large models separately."
+        }
+
         [pscustomobject]@{
             Provider     = "ollama"
             Model        = $Model
@@ -752,7 +785,7 @@ function Invoke-OllamaBenchmark {
             PromptEvalMs = $null
             TTFTMs       = $null
             TokensPerSec = 0.0
-            Error        = $_.Exception.Message
+            Error        = $msg
             StartedAtMs  = $startedMs
             Raw          = $null
         }
@@ -760,7 +793,10 @@ function Invoke-OllamaBenchmark {
 }
 
 function Invoke-CmdCapture {
-    param([Parameter(Mandatory)][string]$Command)
+    param(
+        [Parameter(Mandatory)][string]$Command,
+        [int]$TimeoutSec = 0
+    )
 
     $tempOut = Join-Path $env:TEMP ("lms_cmd_out_{0}.txt" -f [guid]::NewGuid().ToString("N"))
     $tempErr = Join-Path $env:TEMP ("lms_cmd_err_{0}.txt" -f [guid]::NewGuid().ToString("N"))
@@ -769,10 +805,19 @@ function Invoke-CmdCapture {
         $proc = Start-Process -FilePath "cmd.exe" `
             -ArgumentList "/d", "/c", $Command `
             -NoNewWindow `
-            -Wait `
             -PassThru `
             -RedirectStandardOutput $tempOut `
             -RedirectStandardError $tempErr
+
+        if ($TimeoutSec -gt 0) {
+            $finished = $proc.WaitForExit($TimeoutSec * 1000)
+            if (-not $finished) {
+                try { $proc.Kill() } catch {}
+                throw "Command timed out after $TimeoutSec seconds: $Command"
+            }
+        }
+
+        $proc.WaitForExit()
 
         $stdout = ""
         $stderr = ""
@@ -792,7 +837,7 @@ function Invoke-CmdCapture {
             Output   = $combined
             StdOut   = $stdout
             StdErr   = $stderr
-            ExitCode = $proc.ExitCode
+            ExitCode = [int]$proc.ExitCode
         }
     }
     finally {
@@ -858,14 +903,14 @@ function Get-LmsModels {
 function Invoke-LmsLoad {
     param([string]$Model)
     $escapedModel = $Model.Replace('"', '\"')
-    Invoke-CmdCapture -Command "lms load `"$escapedModel`""
+    Invoke-CmdCapture -Command "lms load `"$escapedModel`"" -TimeoutSec 60
 }
 
 function Invoke-LmsUnload {
     param([string]$Model)
     try {
         $escapedModel = $Model.Replace('"', '\"')
-        [void](Invoke-CmdCapture -Command "lms unload `"$escapedModel`"")
+        [void](Invoke-CmdCapture -Command "lms unload `"$escapedModel`"" -TimeoutSec 30)
     }
     catch {}
 }
@@ -967,7 +1012,7 @@ function Invoke-LmsBenchmark {
         $escapedModel = $Model.Replace('"', '\"')
         $escapedPrompt = $Prompt.Replace('"', '\"')
 
-        $result = Invoke-CmdCapture -Command "lms chat `"$escapedModel`" --prompt `"$escapedPrompt`" --stats"
+        $result = Invoke-CmdCapture -Command "lms chat `"$escapedModel`" --prompt `"$escapedPrompt`" --stats" -TimeoutSec $TimeoutSec
         $sw.Stop()
 
         $fullText = $result.Output
@@ -1024,7 +1069,17 @@ function Invoke-LmsBenchmark {
         $sw.Stop()
 
         $msg = $_.Exception.Message
-        if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Unknown LMS error." }
+        if ([string]::IsNullOrWhiteSpace($msg)) {
+            $msg = "Unknown LMS error."
+        }
+
+        if ($msg -match '(?i)timed out after') {
+            $msg += " Possible causes: slow generation, model stall, or local CPU/GPU/memory pressure. Consider increasing -TimeoutSec, rerunning the model individually, or checking whether LM Studio is under heavy load."
+        }
+
+        if ($msg -match '(?i)out of memory|not enough memory|insufficient memory') {
+            $msg += " Memory-related LM Studio failure detected. Try unloading other models, reducing concurrent runtime usage, or benchmarking large models separately."
+        }
 
         [pscustomobject]@{
             Provider     = "lms"
@@ -1476,6 +1531,8 @@ if ($Provider -eq "ollama" -or $Provider -eq "all") {
             param($m, $p, $c)
             Invoke-OllamaBenchmark -BaseUrl $OllamaBaseUrl -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c
         }
+        Write-Host ("Releasing Ollama model from memory: {0}" -f $model) -ForegroundColor DarkGray
+        Unload-OllamaModel -BaseUrl $OllamaBaseUrl -Model $model
     }
 }
 
@@ -1485,6 +1542,8 @@ if ($Provider -eq "lms" -or $Provider -eq "all") {
             param($m, $p, $c)
             Invoke-LmsBenchmark -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c
         }
+        Write-Host ("Releasing LM Studio model from memory: {0}" -f $model) -ForegroundColor DarkGray
+        Invoke-LmsUnload -Model $model
     }
 }
 
