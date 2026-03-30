@@ -110,6 +110,35 @@ Replace `.\results\` below with the output directory you used, for example `.\re
 Import-Csv .\results\leaderboard.csv | Out-GridView -Title "Leaderboard"
 ```
 
+### Leaderboard with all columns sortable
+```powershell
+Import-Csv .\results-all\leaderboard.csv |
+    ForEach-Object {
+        [pscustomobject]@{
+            Provider             = $_.Provider
+            Model                = $_.Model
+            ModelSizeGB          = if ($_.ModelSizeGB) { [double]$_.ModelSizeGB } else { $null }
+            Params               = $_.Params
+            Quantization         = $_.Quantization
+            InitialLoadMs        = if ($_.InitialLoadMs -and $_.InitialLoadMs -ne 'n/a') { [double]$_.InitialLoadMs } else { $null }
+            InitialTotalMs       = if ($_.InitialTotalMs) { [double]$_.InitialTotalMs } else { $null }
+            WarmAvgTotalMs       = if ($_.WarmAvgTotalMs) { [double]$_.WarmAvgTotalMs } else { $null }
+            WarmAvgTokensPerSec  = if ($_.WarmAvgTokensPerSec) { [double]$_.WarmAvgTokensPerSec } else { $null }
+            SuccessRate          = if ($_.SuccessRate) { [double]$_.SuccessRate } else { $null }
+            AvgQualityScore      = if ($_.AvgQualityScore) { [double]$_.AvgQualityScore } else { $null }
+            ReasoningScore       = if ($_.ReasoningScore) { [double]$_.ReasoningScore } else { $null }
+            JsonScore            = if ($_.JsonScore) { [double]$_.JsonScore } else { $null }
+            CodingScore          = if ($_.CodingScore) { [double]$_.CodingScore } else { $null }
+            InstructionScore     = if ($_.InstructionScore) { [double]$_.InstructionScore } else { $null }
+            SummarizationScore   = if ($_.SummarizationScore) { [double]$_.SummarizationScore } else { $null }
+            SpeedScore           = if ($_.SpeedScore) { [double]$_.SpeedScore } else { $null }
+            ReliabilityScore     = if ($_.ReliabilityScore) { [double]$_.ReliabilityScore } else { $null }
+            OverallScore         = if ($_.OverallScore) { [double]$_.OverallScore } else { $null }
+        }
+    } |
+    Out-GridView -Title "Leaderboard"
+```
+
 ### Leaderboard by overall score
 ```powershell
 Import-Csv .\results\leaderboard.csv |
