@@ -112,7 +112,7 @@ Import-Csv .\results\leaderboard.csv | Out-GridView -Title "Leaderboard"
 
 ### Leaderboard with all columns sortable
 ```powershell
-Import-Csv .\results-all\leaderboard.csv |
+Import-Csv .\results\leaderboard.csv |
     ForEach-Object {
         [pscustomobject]@{
             Provider             = $_.Provider
