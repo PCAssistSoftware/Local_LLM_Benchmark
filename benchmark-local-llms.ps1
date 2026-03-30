@@ -1699,7 +1699,7 @@ if ($failed.Count -gt 0) {
     Write-Host "  $failuresCsv"
 }
 
-Import-Csv .\results-all\leaderboard.csv |
+Import-Csv $leaderboardCsv |
     ForEach-Object {
         [pscustomobject]@{
             Provider             = $_.Provider
