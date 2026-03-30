@@ -136,6 +136,7 @@ Import-Csv .\results-all\leaderboard.csv |
             OverallScore         = if ($_.OverallScore) { [double]$_.OverallScore } else { $null }
         }
     } |
+    Sort-Object OverallScore -Descending |
     Out-GridView -Title "Leaderboard"
 ```
 
