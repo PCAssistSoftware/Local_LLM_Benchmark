@@ -105,6 +105,11 @@ This means `AvgQualityScore` reflects answer quality only, while `OverallScore` 
 
 Replace `.\results\` below with the output directory you used, for example `.\results-lms\`, `.\results-ollama\`, or `.\results-all\`.
 
+### Leaderboard 
+```powershell
+Import-Csv .\results\leaderboard.csv | Out-GridView -Title "Leaderboard"
+```
+
 ### Leaderboard by overall score
 ```powershell
 Import-Csv .\results\leaderboard.csv |
