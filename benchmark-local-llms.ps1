@@ -1557,7 +1557,8 @@ $grouped = $results | Group-Object Provider, Model
 $summary = foreach ($g in $grouped) {
     $items = @($g.Group)
     $startup = @($items | Where-Object { $_.TestId -eq "__startup__" -and $_.Success -eq $true })
-    $warm = @($items | Where-Object { $_.TestId -ne "__startup__" -and $_.Success -eq $true })
+    $warm = @($items | Where-Object { $_.TestId -ne "__startup__" })
+    $warmSuccess = @($warm | Where-Object { $_.Success -eq $true })
 
     $successRate = [Math]::Round(((@($items | Where-Object { $_.Success -eq $true }).Count / $items.Count) * 100), 2)
 
@@ -1569,17 +1570,17 @@ $summary = foreach ($g in $grouped) {
     }
 
     $warmAvgTotalMs = $null
-    if ($warm.Count -gt 0) {
-        $warmAvgTotalMs = [Math]::Round((($warm | Measure-Object -Property TotalMs -Average).Average), 2)
+    if ($warmSuccess.Count -gt 0) {
+        $warmAvgTotalMs = [Math]::Round((($warmSuccess | Measure-Object -Property TotalMs -Average).Average), 2)
     }
 
-    $warmLoadItems = @($warm | Where-Object { $null -ne $_.LoadMs })
+    $warmLoadItems = @($warmSuccess | Where-Object { $null -ne $_.LoadMs })
     $warmAvgLoadMs = $null
     if ($warmLoadItems.Count -gt 0) {
         $warmAvgLoadMs = [Math]::Round((($warmLoadItems | Measure-Object -Property LoadMs -Average).Average), 2)
     }
 
-    $warmTpsItems = @($warm | Where-Object { $null -ne $_.TokensPerSec })
+    $warmTpsItems = @($warmSuccess | Where-Object { $null -ne $_.TokensPerSec })
     $warmAvgTps = 0.0
     if ($warmTpsItems.Count -gt 0) {
         $warmAvgTps = [Math]::Round((($warmTpsItems | Measure-Object -Property TokensPerSec -Average).Average), 2)
