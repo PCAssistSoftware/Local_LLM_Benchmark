@@ -653,8 +653,6 @@ function Invoke-OllamaUnload {
             -ContentType "application/json" `
             -Body $body `
             -TimeoutSec 20 | Out-Null
-
-        Write-Host ("Unloaded Ollama model: {0}" -f $Model) -ForegroundColor DarkGray
     }
     catch {
         Write-Warning ("Failed to unload Ollama model '{0}': {1}" -f $Model, $_.Exception.Message)
@@ -899,7 +897,9 @@ function Invoke-LmsUnload {
         $escapedModel = $Model.Replace('"', '\"')
         [void](Invoke-CmdCapture -Command "lms unload `"$escapedModel`"" -TimeoutSec 30)
     }
-    catch {}
+    catch {
+        Write-Warning ("Failed to unload LMS model '{0}': {1}" -f $Model, $_.Exception.Message)
+    }
 }
 
 function Parse-LmsStats {
