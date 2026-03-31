@@ -635,28 +635,11 @@ function Get-InstalledOllamaModels {
     }
 }
 
-function Unload-OllamaModel {
+function Invoke-OllamaUnload {
     param(
         [string]$BaseUrl,
         [string]$Model
     )
-
-    $body = @{
-        model      = $Model
-        keep_alive = 0
-    } | ConvertTo-Json -Depth 5
-
-    try {
-        Invoke-RestMethod -Uri "$BaseUrl/api/generate" -Method Post -ContentType "application/json" -Body $body | Out-Null
-        Write-Host ("Unloaded Ollama model: {0}" -f $Model) -ForegroundColor DarkGray
-    }
-    catch {
-        Write-Warning ("Failed to unload Ollama model '{0}': {1}" -f $Model, $_.Exception.Message)
-    }
-}
-
-function Invoke-OllamaUnload {
-    param([string]$BaseUrl, [string]$Model)
 
     try {
         $body = @{
@@ -670,8 +653,12 @@ function Invoke-OllamaUnload {
             -ContentType "application/json" `
             -Body $body `
             -TimeoutSec 20 | Out-Null
+
+        Write-Host ("Unloaded Ollama model: {0}" -f $Model) -ForegroundColor DarkGray
     }
-    catch {}
+    catch {
+        Write-Warning ("Failed to unload Ollama model '{0}': {1}" -f $Model, $_.Exception.Message)
+    }
 }
 
 function Invoke-OllamaBenchmark {
@@ -1532,7 +1519,7 @@ if ($Provider -eq "ollama" -or $Provider -eq "all") {
             Invoke-OllamaBenchmark -BaseUrl $OllamaBaseUrl -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c
         }
         Write-Host ("Releasing Ollama model from memory: {0}" -f $model) -ForegroundColor DarkGray
-        Unload-OllamaModel -BaseUrl $OllamaBaseUrl -Model $model
+        Invoke-OllamaUnload -BaseUrl $OllamaBaseUrl -Model $model
     }
 }
 
