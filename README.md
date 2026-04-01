@@ -204,3 +204,7 @@ Import-Csv .\results\raw-results.csv |
 ## Raw results fields
 
 Raw results include a `RunTimestampUtc` field in ISO UTC format (example: `2026-03-30T18:42:15Z`), making it easy to sort and compare rows across runs.
+
+
+## Screenshots
+![Screenshot of results in console and gridview.](/screenshot.png)
