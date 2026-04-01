@@ -45,7 +45,7 @@ param(
     [string[]]$LmsModels = @(),
 
     [ValidateRange(1, 100)]
-    [int]$Repeats = 2,
+    [int]$Repeats = 3,
 
     [int]$TimeoutSec = 180,
 
@@ -54,7 +54,19 @@ param(
     [string]$OllamaBaseUrl = "http://localhost:11434",
 
     [switch]$AutoDetectLmsModels,
-    [switch]$AutoDetectOllamaModels
+    [switch]$AutoDetectOllamaModels,
+
+    [ValidateRange(0, 10)]
+    [int]$RetryOnFailure = 0,
+
+    [ValidateRange(0, 30000)]
+    [int]$OllamaColdStartWarmupMs = 400,
+
+    [ValidateRange(0, 30000)]
+    [int]$LmsColdStartUnloadMs = 300,
+
+    [ValidateRange(0, 30000)]
+    [int]$LmsColdStartLoadMs = 500
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,16 +86,16 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id           = "reasoning_02"
         Category     = "reasoning"
-        Prompt       = "A sequence starts 2, 6, 18, 54. What is the next number? Answer with just the number."
+        Prompt       = "Alice is taller than Bob. Bob is taller than Carol. Who is the shortest of the three? Answer with just the name."
         ScoreType    = "exact"
-        ExpectedText = "162"
+        ExpectedText = "Carol"
     },
     [pscustomobject]@{
         Id           = "reasoning_03"
         Category     = "reasoning"
-        Prompt       = "If 5 workers take 12 days to complete a job at the same constant rate, how many days would 10 workers take? Answer with just the number."
+        Prompt       = "What is the next number in this sequence: 1, 1, 2, 3, 5, 8, ? Answer with just the number."
         ScoreType    = "exact"
-        ExpectedText = "6"
+        ExpectedText = "13"
     },
     [pscustomobject]@{
         Id           = "json_01"
@@ -106,10 +118,21 @@ $PromptSuite = @(
         }
     },
     [pscustomobject]@{
+        Id           = "json_03"
+        Category     = "json"
+        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: city, country, continent. Values: Tokyo, Japan, Asia."
+        ScoreType    = "json_keys"
+        ExpectedJson = @{
+            city      = "Tokyo"
+            country   = "Japan"
+            continent = "Asia"
+        }
+    },
+    [pscustomobject]@{
         Id           = "coding_01"
         Category     = "coding"
-        Prompt       = "Write a Python function is_even(n) that returns True if n is even, otherwise False. Do not include example usage."
-        ScoreType    = "python_is_even"
+        Prompt       = "Write a Python function is_palindrome(s) that returns True if s is a palindrome ignoring case and non-alphabetic characters, otherwise False. Do not include example usage."
+        ScoreType    = "python_is_palindrome"
     },
     [pscustomobject]@{
         Id           = "coding_02"
@@ -118,18 +141,31 @@ $PromptSuite = @(
         ScoreType    = "js_clamp"
     },
     [pscustomobject]@{
-        Id           = "instruction_01"
-        Category     = "instruction"
-        Prompt       = "Return exactly this text and nothing else: BLUE"
-        ScoreType    = "exact"
-        ExpectedText = "BLUE"
+        Id           = "coding_03"
+        Category     = "coding"
+        Prompt       = "Write a Python function factorial(n) that returns the factorial of n. Do not include example usage."
+        ScoreType    = "python_factorial"
     },
     [pscustomobject]@{
-        Id           = "instruction_02"
+        Id            = "instruction_01"
+        Category      = "instruction"
+        Prompt        = "Write only the plural of each of these words, comma-separated, nothing else: child, mouse, tooth"
+        ScoreType     = "regex"
+        ExpectedRegex = '^children,\s*mice,\s*teeth$'
+    },
+    [pscustomobject]@{
+        Id            = "instruction_02"
+        Category      = "instruction"
+        Prompt        = "Sort these words alphabetically and return them as a comma-separated list, nothing else: banana, apple, cherry, date"
+        ScoreType     = "regex"
+        ExpectedRegex = '^apple,\s*banana,\s*cherry,\s*date$'
+    },
+    [pscustomobject]@{
+        Id           = "instruction_03"
         Category     = "instruction"
-        Prompt       = "Return exactly three comma-separated lowercase colors and nothing else: red,blue,green"
+        Prompt       = "Write only the Roman numeral for 14, nothing else."
         ScoreType    = "exact"
-        ExpectedText = "red,blue,green"
+        ExpectedText = "XIV"
     },
     [pscustomobject]@{
         Id            = "summary_01"
@@ -146,15 +182,27 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id            = "summary_02"
         Category      = "summarization"
-        Prompt        = "Summarize this in exactly one sentence including the words budget, deadline, testing, and release: The team delayed the release by one week to finish testing, stay within budget, and reduce the risk of post-launch defects."
+        Prompt        = "Summarize this in exactly one sentence including the words budget, delay, testing, and release: The team delayed the release by one week to finish testing, stay within budget, and reduce the risk of post-launch defects."
         ScoreType     = "contains_all"
         RequiredTerms = @(
             "budget",
-            "deadline",
+            "delay",
             "testing",
             "release"
         )
-}
+    },
+    [pscustomobject]@{
+        Id            = "summary_03"
+        Category      = "summarization"
+        Prompt        = "Summarize this in exactly one sentence including the words battery, range, charging, and electric: The new electric vehicle features an improved battery that extends the range to 400 miles and supports ultra-fast charging."
+        ScoreType     = "contains_all"
+        RequiredTerms = @(
+            "battery",
+            "range",
+            "charging",
+            "electric"
+        )
+    }
 )
 
 function Get-NowMs {
@@ -167,6 +215,7 @@ function Get-NowIsoUtc {
 
 function Estimate-TokenCount {
     param([string]$Text)
+    # Fallback estimate only. Provider-reported token counts (eval_count / PredictedTokens) are preferred where available.
     if ([string]::IsNullOrWhiteSpace($Text)) { return 0 }
     $wordCount = [regex]::Matches($Text, '\S+').Count
     return [Math]::Max(1, [int][Math]::Round($wordCount * 1.3))
@@ -181,6 +230,8 @@ function Normalize-ModelOutput {
 
     $clean = $Text
     $clean = [regex]::Replace($clean, '\x1B\[[0-9;?]*[ -/]*[@-~]', '')
+    # Strip <think>...</think> blocks emitted by reasoning models before scoring
+    $clean = [regex]::Replace($clean, '(?si)<think>.*?</think>', '')
     $clean = $clean.Trim()
     $clean = [regex]::Replace($clean, '^\s*```[a-zA-Z0-9_-]*\s*', '')
     $clean = [regex]::Replace($clean, '\s*```\s*$', '')
@@ -391,7 +442,7 @@ function Show-StartupBanner {
     Write-Host ("WarmRepeats     : {0}" -f $Repeats)
     Write-Host ("PromptCount     : {0}" -f $PromptCount)
     Write-Host ("OutputDir       : {0}" -f $OutputDir)
-     if ($Provider -eq "ollama" -or $Provider -eq "all") {
+    if ($Provider -eq "ollama" -or $Provider -eq "all") {
         Write-Host ("OllamaBaseUrl   : {0}" -f $OllamaBaseUrl)
     }
 
@@ -508,16 +559,54 @@ function Get-QualityScore {
             return [Math]::Round((100.0 * $hits) / $required.Count, 2)
         }
 
-        "python_is_even" {
-            $hasFunction = $normalized -match 'def\s+is_even\s*\('
-            $hasDirectBoolean = $normalized -match 'return\s+.*%\s*2\s*==\s*0'
-            $hasBranching = (
-                ($normalized -match '\bif\b') -and
-                ($normalized -match 'return\s+True') -and
-                ($normalized -match 'return\s+False')
+        "python_is_palindrome" {
+            $hasFunction = $normalized -match 'def\s+is_palindrome\s*\('
+            $hasLower    = $normalized -match '\.lower\(\)|\.casefold\(\)'
+            $hasFilter   = (
+                $normalized -match '\.isalpha\(\)' -or
+                $normalized -match 're\.sub' -or
+                $normalized -match '\.isalnum\(\)'
+            )
+            $hasReverse  = (
+                $normalized -match '\[::-1\]' -or
+                $normalized -match 'reversed\s*\('
             )
 
-            if ($hasFunction -and ($hasDirectBoolean -or $hasBranching)) {
+            if ($hasFunction -and $hasLower -and $hasFilter -and $hasReverse) {
+                return 100
+            }
+            if ($hasFunction -and ($hasLower -or $hasFilter) -and $hasReverse) {
+                return 75
+            }
+            if ($hasFunction) {
+                return 50
+            }
+
+            return 0
+        }
+
+        "python_factorial" {
+            $hasFunction = $normalized -match 'def\s+factorial\s*\('
+            # Recursive: calls factorial(n - 1) with multiplication
+            $hasRecursive = (
+                $normalized -match 'factorial\s*\(.*n\s*-\s*1' -and
+                ($normalized -match '\*' -or $normalized -match 'return\s+n\s*\*')
+            )
+            # Iterative: loop with a multiplication/accumulator and a return
+            $hasIterative = (
+                ($normalized -match '\bfor\b' -or $normalized -match '\bwhile\b') -and
+                $normalized -match '\*=?' -and
+                $normalized -match 'return'
+            )
+            # Base case: n <= 1, n == 0, or n == 1
+            $hasBaseCase = (
+                $normalized -match 'n\s*<=?\s*1' -or
+                $normalized -match 'if\s+n\s*==\s*0' -or
+                $normalized -match 'if\s+n\s*==\s*1'
+            )
+
+            # Recursive requires an explicit base case; iterative does not (loop from 2..n handles n=0/1 implicitly)
+            if ($hasFunction -and (($hasRecursive -and $hasBaseCase) -or $hasIterative)) {
                 return 100
             }
 
@@ -529,7 +618,10 @@ function Get-QualityScore {
         }
 
         "js_clamp" {
-            $hasFunction = $normalized -match 'function\s+clamp\s*\('
+            $hasFunction = (
+                $normalized -match 'function\s+clamp\s*\(' -or
+                $normalized -match '(?:const|let|var)\s+clamp\s*='
+            )
             $hasMathClamp = $normalized -match 'Math\.min\s*\(\s*Math\.max\s*\(\s*value\s*,\s*min\s*\)\s*,\s*max\s*\)'
             $hasBranching = (
                 ($normalized -match '\bif\b') -and
@@ -537,8 +629,13 @@ function Get-QualityScore {
                 ($normalized -match 'return\s+max') -and
                 ($normalized -match 'return\s+value')
             )
+            # Covers ternary style: value < min ? min : value > max ? max : value
+            $hasTernary = (
+                $normalized -match 'value\s*<\s*min\s*\?\s*min' -and
+                $normalized -match 'value\s*>\s*max\s*\?\s*max'
+            )
 
-            if ($hasFunction -and ($hasMathClamp -or $hasBranching)) {
+            if ($hasFunction -and ($hasMathClamp -or $hasBranching -or $hasTernary)) {
                 return 100
             }
 
@@ -665,12 +762,13 @@ function Invoke-OllamaBenchmark {
         [string]$Model,
         [string]$Prompt,
         [int]$TimeoutSec,
-        [bool]$ColdStart
+        [bool]$ColdStart,
+        [int]$ColdStartWarmupMs = 400
     )
 
     if ($ColdStart) {
         Invoke-OllamaUnload -BaseUrl $BaseUrl -Model $Model
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds $ColdStartWarmupMs
     }
 
     $bodyObject = @{
@@ -734,7 +832,7 @@ function Invoke-OllamaBenchmark {
             TotalMs      = $totalMs
             LoadMs       = [Math]::Round($loadDurationNs / 1e6, 2)
             PromptEvalMs = [Math]::Round($promptEvalNs / 1e6, 2)
-            TTFTMs       = $null
+            TTFTMs       = $(if ($loadDurationNs -gt 0 -and $promptEvalNs -gt 0) { [Math]::Round(($loadDurationNs + $promptEvalNs) / 1e6, 2) } else { $null })
             TokensPerSec = $tokensPerSec
             Error        = $null
             StartedAtMs  = $startedMs
@@ -800,19 +898,23 @@ function Invoke-CmdCapture {
                 try { $proc.Kill() } catch {}
                 throw "Command timed out after $TimeoutSec seconds: $Command"
             }
+            else {
+                $proc.WaitForExit()  # flush async stdout/stderr handles
+            }
         }
-
-        $proc.WaitForExit()
+        else {
+            $proc.WaitForExit()
+        }
 
         $stdout = ""
         $stderr = ""
 
         if (Test-Path -LiteralPath $tempOut) {
-            $stdout = Get-Content -LiteralPath $tempOut -Raw -ErrorAction SilentlyContinue
+            $stdout = Get-Content -LiteralPath $tempOut -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         }
 
         if (Test-Path -LiteralPath $tempErr) {
-            $stderr = Get-Content -LiteralPath $tempErr -Raw -ErrorAction SilentlyContinue
+            $stderr = Get-Content -LiteralPath $tempErr -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
         }
 
         $combined = @($stdout, $stderr) -join "`n"
@@ -829,6 +931,27 @@ function Invoke-CmdCapture {
         Remove-Item -LiteralPath $tempOut -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $tempErr -ErrorAction SilentlyContinue
     }
+}
+
+function Escape-CmdArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return "" }
+
+    $escaped = $Value
+
+    # Escape cmd.exe metacharacters.
+    # ^ must be doubled first — before other replacements add new carets that would then get doubled themselves.
+    $escaped = $escaped -replace '\^', '^^'
+    $escaped = $escaped -replace '([&|<>])', '^$1'
+
+    # Escape percent signs to prevent environment-variable expansion
+    $escaped = $escaped -replace '%', '%%'
+
+    # Escape embedded double-quotes for the surrounding quoted argument
+    $escaped = $escaped.Replace('"', '\"')
+
+    return $escaped
 }
 
 function Get-LmsModels {
@@ -887,14 +1010,14 @@ function Get-LmsModels {
 
 function Invoke-LmsLoad {
     param([string]$Model)
-    $escapedModel = $Model.Replace('"', '\"')
+    $escapedModel = Escape-CmdArgument -Value $Model
     Invoke-CmdCapture -Command "lms load `"$escapedModel`"" -TimeoutSec 60
 }
 
 function Invoke-LmsUnload {
     param([string]$Model)
     try {
-        $escapedModel = $Model.Replace('"', '\"')
+        $escapedModel = Escape-CmdArgument -Value $Model
         [void](Invoke-CmdCapture -Command "lms unload `"$escapedModel`"" -TimeoutSec 30)
     }
     catch {
@@ -978,7 +1101,9 @@ function Invoke-LmsBenchmark {
         [string]$Model,
         [string]$Prompt,
         [int]$TimeoutSec,
-        [bool]$ColdStart
+        [bool]$ColdStart,
+        [int]$ColdStartUnloadMs = 300,
+        [int]$ColdStartLoadMs   = 500
     )
 
     if (-not (Test-CommandExists -Name "lms")) {
@@ -987,17 +1112,17 @@ function Invoke-LmsBenchmark {
 
     if ($ColdStart) {
         Invoke-LmsUnload -Model $Model
-        Start-Sleep -Milliseconds 300
+        Start-Sleep -Milliseconds $ColdStartUnloadMs
         [void](Invoke-LmsLoad -Model $Model)
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds $ColdStartLoadMs
     }
 
     $startedMs = Get-NowMs
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
-        $escapedModel = $Model.Replace('"', '\"')
-        $escapedPrompt = $Prompt.Replace('"', '\"')
+        $escapedModel  = Escape-CmdArgument -Value $Model
+        $escapedPrompt = Escape-CmdArgument -Value $Prompt
 
         $result = Invoke-CmdCapture -Command "lms chat `"$escapedModel`" --prompt `"$escapedPrompt`" --stats" -TimeoutSec $TimeoutSec
         $sw.Stop()
@@ -1094,7 +1219,6 @@ function New-MarkdownReport {
         $SystemInfo,
         [string]$Provider,
         [int]$Repeats,
-        [bool]$IncludeQuality,
         [int]$PromptCount,
         $Leaderboard
     )
@@ -1140,7 +1264,7 @@ function New-MarkdownReport {
     if ($null -ne $Leaderboard -and $Leaderboard.Count -gt 0) {
         $lines.Add("## Leaderboard")
         $lines.Add("")
-        $lines.Add("| Rank | Provider | Model | ModelGB | Params | Quant | OverallScore | SpeedScore | AvgQualityScore | SuccessRate |")
+        $lines.Add("| Rank | Provider | Model | ModelSizeGB | Params | Quant | OverallScore | SpeedScore | AvgQualityScore | SuccessRate |")
         $lines.Add("|---:|---|---|---:|---|---|---:|---:|---:|---:|")
 
         $rank = 1
@@ -1160,12 +1284,12 @@ function New-MarkdownReport {
         }
 
         $lines.Add("")
-        $lines.Add("> **Note:** ModelGB is the approximate on-disk model size reported by the local runtime. Larger models will often be slower on the same hardware, and quantization can also materially affect speed and quality.")
+        $lines.Add("> **Note:** ModelSizeGB is the approximate on-disk model size reported by the local runtime. Larger models will often be slower on the same hardware, and quantization can also materially affect speed and quality.")
          
         $lines.Add("")
         $lines.Add("## Performance")
         $lines.Add("")
-        $lines.Add("| Provider | Model | ModelGB | Params | Quant | InitialLoadMs | InitialTotalMs | WarmAvgTotalMs | WarmAvgTokensPerSec |")
+        $lines.Add("| Provider | Model | ModelSizeGB | Params | Quant | InitialLoadMs | InitialTotalMs | WarmAvgTotalMs | WarmAvgTokensPerSec |")
         $lines.Add("|---|---|---:|---|---|---:|---:|---:|---:|")
         foreach ($row in $Leaderboard) {
             $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} |" -f `
@@ -1480,6 +1604,17 @@ function Add-BenchmarkRows {
 
             $r = & $InvokeFn $Model $test.Prompt $false
 
+            if (-not $r.Success -and $RetryOnFailure -gt 0) {
+                for ($attempt = 1; $attempt -le $RetryOnFailure; $attempt++) {
+                    Write-Warning ("provider={0} model={1} test={2} repeat={3} failed, retrying (attempt {4} of {5})..." -f $ProviderName, $Model, $test.Id, $i, $attempt, $RetryOnFailure)
+                    $r = & $InvokeFn $Model $test.Prompt $false
+                    if ($r.Success) { break }
+                }
+                if (-not $r.Success) {
+                    Write-Warning ("provider={0} model={1} test={2} repeat={3} — initial attempt plus {4} retr{5} failed. Recording as failure." -f $ProviderName, $Model, $test.Id, $i, $RetryOnFailure, $(if ($RetryOnFailure -eq 1) { 'y' } else { 'ies' }))
+                }
+            }
+
             $quality = Get-QualityScore -Text $r.OutputText -Test $test
 
             $runTimestampUtc = Get-NowIsoUtc
@@ -1516,7 +1651,7 @@ if ($Provider -eq "ollama" -or $Provider -eq "all") {
     foreach ($model in $OllamaModels) {
         Add-BenchmarkRows -ProviderName "ollama" -Model $model -InvokeFn {
             param($m, $p, $c)
-            Invoke-OllamaBenchmark -BaseUrl $OllamaBaseUrl -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c
+            Invoke-OllamaBenchmark -BaseUrl $OllamaBaseUrl -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c -ColdStartWarmupMs $OllamaColdStartWarmupMs
         }
         Write-Host ("Releasing Ollama model from memory: {0}" -f $model) -ForegroundColor DarkGray
         Invoke-OllamaUnload -BaseUrl $OllamaBaseUrl -Model $model
@@ -1527,7 +1662,7 @@ if ($Provider -eq "lms" -or $Provider -eq "all") {
     foreach ($model in $LmsModels) {
         Add-BenchmarkRows -ProviderName "lms" -Model $model -InvokeFn {
             param($m, $p, $c)
-            Invoke-LmsBenchmark -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c
+            Invoke-LmsBenchmark -Model $m -Prompt $p -TimeoutSec $TimeoutSec -ColdStart $c -ColdStartUnloadMs $LmsColdStartUnloadMs -ColdStartLoadMs $LmsColdStartLoadMs
         }
         Write-Host ("Releasing LM Studio model from memory: {0}" -f $model) -ForegroundColor DarkGray
         Invoke-LmsUnload -Model $model
@@ -1560,7 +1695,7 @@ $summary = foreach ($g in $grouped) {
     $warm = @($items | Where-Object { $_.TestId -ne "__startup__" })
     $warmSuccess = @($warm | Where-Object { $_.Success -eq $true })
 
-    $successRate = [Math]::Round(((@($items | Where-Object { $_.Success -eq $true }).Count / $items.Count) * 100), 2)
+    $successRate = [Math]::Round((($warmSuccess.Count / [Math]::Max(1, $warm.Count)) * 100), 2)
 
     $initialLoadMs = $null
     $initialTotalMs = $null
@@ -1628,7 +1763,7 @@ $summary = foreach ($g in $grouped) {
 
 $summary = @($summary | Where-Object { $_.SuccessRate -gt 0 })
 
-$leaderboard = @()
+$leaderboard = [System.Collections.Generic.List[object]]::new()
 
 if ($summary.Count -gt 0) {
     $minTps = ($summary | Measure-Object -Property WarmAvgTokensPerSec -Minimum).Minimum
@@ -1659,9 +1794,9 @@ if ($summary.Count -gt 0) {
         $reliabilityScore = [double]$s.SuccessRate
 
         $speedScore = [Math]::Round((0.50 * $throughputScore) + (0.30 * $warmLatencyScore) + (0.20 * $startupScore), 2)
-        $overallScore = [Math]::Round((0.55 * $qualityScore) + (0.30 * $speedScore) + (0.15 * $reliabilityScore), 2)
+        $overallScore = [Math]::Round((0.75 * $qualityScore) + (0.15 * $speedScore) + (0.10 * $reliabilityScore), 2)
       
-        $leaderboard += [pscustomobject]@{
+        $leaderboard.Add([pscustomobject]@{
             Provider            = $s.Provider
             Model               = $s.Model
             ModelSizeGB         = $s.ModelSizeGB
@@ -1681,7 +1816,7 @@ if ($summary.Count -gt 0) {
             SpeedScore          = $speedScore
             ReliabilityScore    = $reliabilityScore
             OverallScore        = $overallScore
-        }
+        })
     }
 }
 
@@ -1702,18 +1837,18 @@ if ($leaderboard.Count -gt 0) {
     $leaderboard |
     Select-Object `
         Provider,
-    Model,
-    @{ Name = "ModelGB"; Expression = { if ($null -ne $_.ModelSizeGB) { $_.ModelSizeGB } else { "n/a" } } },
-    @{ Name = "Params"; Expression = { if (-not [string]::IsNullOrWhiteSpace($_.Params)) { $_.Params } else { "n/a" } } },
-    @{ Name = "Quantization"; Expression = { if (-not [string]::IsNullOrWhiteSpace($_.Quantization)) { $_.Quantization } else { "n/a" } } },
-    @{ Name = "InitialLoadMs"; Expression = { if ($null -ne $_.InitialLoadMs) { $_.InitialLoadMs } else { "n/a" } } },
-    InitialTotalMs,
-    WarmAvgTotalMs,
-    WarmAvgTokensPerSec,
-    SuccessRate,
-    SpeedScore,
-    OverallScore |
-    Format-Table -AutoSize
+        Model,
+        @{ Name = "ModelSizeGB";  Expression = { if ($null -ne $_.ModelSizeGB) { $_.ModelSizeGB } else { "n/a" } } },
+        @{ Name = "Params";       Expression = { if (-not [string]::IsNullOrWhiteSpace($_.Params)) { $_.Params } else { "n/a" } } },
+        @{ Name = "Quantization"; Expression = { if (-not [string]::IsNullOrWhiteSpace($_.Quantization)) { $_.Quantization } else { "n/a" } } },
+        @{ Name = "InitialLoadMs"; Expression = { if ($null -ne $_.InitialLoadMs) { $_.InitialLoadMs } else { "n/a" } } },
+        InitialTotalMs,
+        WarmAvgTotalMs,
+        WarmAvgTokensPerSec,
+        SuccessRate |
+    Format-Table -AutoSize |
+    Out-String -Width 9999 |
+    Write-Host
 }
 else {
     Write-Host "No leaderboard rows generated."
@@ -1723,8 +1858,10 @@ Write-Host ""
 Write-Host "Quality Breakdown:" -ForegroundColor Green
 if ($leaderboard.Count -gt 0) {
     $leaderboard |
-    Select-Object Provider, Model, AvgQualityScore, ReasoningScore, JsonScore, CodingScore, InstructionScore, SummarizationScore |
-    Format-Table -AutoSize
+    Select-Object Model, AvgQualityScore, ReasoningScore, JsonScore, CodingScore, InstructionScore, SummarizationScore, SpeedScore, ReliabilityScore, OverallScore |
+    Format-Table -AutoSize |
+    Out-String -Width 9999 |
+    Write-Host
 }
 
 if ($failed.Count -gt 0) {
@@ -1732,7 +1869,9 @@ if ($failed.Count -gt 0) {
     Write-Host "Failures:" -ForegroundColor Yellow
     $failed |
     Select-Object Provider, Model, TestId, Repeat, Error |
-    Format-Table -AutoSize
+    Format-Table -AutoSize |
+    Out-String -Width 9999 |
+    Write-Host
 }
 
 Write-Host ""
