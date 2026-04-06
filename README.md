@@ -141,6 +141,11 @@ OverallScore = (0.75 × AvgQualityScore) + (0.15 × SpeedScore) + (0.10 × Relia
 .\benchmark-local-llms.ps1 -Provider all -AutoDetectOllamaModels -AutoDetectLmsModels -Repeats 3 -OutputDir .\results-all
 ```
 
+### Specific models
+```powershell
+.\benchmark-local-llms.ps1 -Provider ollama -OllamaModels "gemma4:e2b","gemma4:e4b","gemma4:26b" -Repeats 3 -OutputDir .\results-subset
+```
+
 ## Viewing results in GridView
 
 Replace `.\results\` below with the output directory you used, for example `.\results-lms\`, `.\results-ollama\`, or `.\results-all\`.
