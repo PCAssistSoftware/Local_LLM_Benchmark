@@ -312,13 +312,17 @@ function Get-SystemInfo {
     $cpuName = $null
     $cpuCores = $null
     $cpuLogical = $null
-    $usableRamGb = $null
-    $installedRamGb = $null
+
+    $installedRamGb = $null   # physical DIMMs
+    $usableRamGb = $null      # visible to OS
+    $hardwareReservedRamGb = $null
+
     $osCaption = $null
     $osVersion = $null
     $osBuild = $null
     $gpus = @()
 
+    # CPU
     try {
         $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
         if ($null -ne $cpu) {
@@ -329,14 +333,7 @@ function Get-SystemInfo {
     }
     catch {}
 
-    try {
-        $cs = Get-CimInstance Win32_ComputerSystem
-        if ($null -ne $cs.TotalPhysicalMemory) {
-            $usableRamGb = [Math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
-        }
-    }
-    catch {}
-
+    # Installed RAM (physical): sum DIMM capacities (most reliable on your system)
     try {
         $physicalMemory = @(Get-CimInstance Win32_PhysicalMemory)
         if ($physicalMemory.Count -gt 0) {
@@ -348,6 +345,21 @@ function Get-SystemInfo {
     }
     catch {}
 
+    # Usable RAM (visible to OS)
+    try {
+        $osMem = Get-CimInstance Win32_OperatingSystem
+        if ($null -ne $osMem.TotalVisibleMemorySize -and [double]$osMem.TotalVisibleMemorySize -gt 0) {
+            # TotalVisibleMemorySize is KB
+            $usableRamGb = [Math]::Round((([double]$osMem.TotalVisibleMemorySize * 1KB) / 1GB), 2)
+        }
+    }
+    catch {}
+
+    if ($null -ne $installedRamGb -and $null -ne $usableRamGb -and $installedRamGb -gt 0 -and $usableRamGb -gt 0) {
+        $hardwareReservedRamGb = [Math]::Round([Math]::Max(0, ($installedRamGb - $usableRamGb)), 2)
+    }
+
+    # OS
     try {
         $os = Get-CimInstance Win32_OperatingSystem
         if ($null -ne $os) {
@@ -358,6 +370,7 @@ function Get-SystemInfo {
     }
     catch {}
 
+    # GPU(s)
     try {
         $videoControllers = @(Get-CimInstance Win32_VideoController)
         foreach ($gpu in $videoControllers) {
@@ -371,38 +384,43 @@ function Get-SystemInfo {
             }
 
             $isIntegrated = $false
-            if ($name -match '(?i)radeon.*graphics|intel\(r\).*graphics|uhd graphics|iris|vega|890m|880m|780m|760m') {
+            if ($name -match '(?i)radeon.*graphics|intel\(r\).*graphics|uhd graphics|iris|vega|890m|880m|780m|760m|8060s') {
                 $isIntegrated = $true
             }
 
+            # UMA shared VRAM: estimate to match Windows UI budget
             $sharedVramGb = $null
-            if ($isIntegrated -and $null -ne $usableRamGb) {
-                $sharedVramGb = $usableRamGb
+            $sharedVramIsEstimated = $false
+            if ($isIntegrated -and $null -ne $installedRamGb -and $installedRamGb -gt 0) {
+                $sharedVramGb = [Math]::Round(($installedRamGb * 0.75), 2)  # 128 GB -> 96 GB
+                $sharedVramIsEstimated = $true
             }
 
             $gpus += [pscustomobject]@{
-                Name            = $name
-                DedicatedVRAMGB = $dedicatedVramGb
-                SharedVRAMGB    = $sharedVramGb
-                IsIntegrated    = $isIntegrated
-                DriverVersion   = $gpu.DriverVersion
-                VideoProcessor  = $gpu.VideoProcessor
-                Status          = $gpu.Status
+                Name                  = $name
+                DedicatedVRAMGB       = $dedicatedVramGb
+                SharedVRAMGB          = $sharedVramGb
+                SharedVRAMIsEstimated = $sharedVramIsEstimated
+                IsIntegrated          = $isIntegrated
+                DriverVersion         = $gpu.DriverVersion
+                VideoProcessor        = $gpu.VideoProcessor
+                Status                = $gpu.Status
             }
         }
     }
     catch {}
 
     [pscustomobject]@{
-        CpuName              = $cpuName
-        CpuCores             = $cpuCores
-        CpuLogicalProcessors = $cpuLogical
-        UsableRamGB          = $usableRamGb
-        InstalledRamGB       = $installedRamGb
-        OsCaption            = $osCaption
-        OsVersion            = $osVersion
-        OsBuild              = $osBuild
-        Gpus                 = @($gpus)
+        CpuName               = $cpuName
+        CpuCores              = $cpuCores
+        CpuLogicalProcessors  = $cpuLogical
+        InstalledRamGB        = $installedRamGb
+        UsableRamGB           = $usableRamGb
+        HardwareReservedRamGB = $hardwareReservedRamGb
+        OsCaption             = $osCaption
+        OsVersion             = $osVersion
+        OsBuild               = $osBuild
+        Gpus                  = @($gpus)
     }
 }
 
@@ -422,6 +440,18 @@ function Test-OllamaAvailable {
     }
 }
 
+function Write-BannerLine {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Value,
+        [int]$LabelWidth = 16
+    )
+
+    # Left-pad labels to a consistent width, then add colon.
+    $padded = $Label.PadRight($LabelWidth)
+    Write-Host ("{0}: {1}" -f $padded, $Value)
+}
+
 function Show-StartupBanner {
     param(
         [string]$Provider,
@@ -438,29 +468,41 @@ function Show-StartupBanner {
     Write-Host "========================================" -ForegroundColor DarkCyan
     Write-Host " Local LLM Benchmark Configuration" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor DarkCyan
-    Write-Host ("Provider        : {0}" -f $Provider)
-    Write-Host ("WarmRepeats     : {0}" -f $Repeats)
-    Write-Host ("PromptCount     : {0}" -f $PromptCount)
-    Write-Host ("OutputDir       : {0}" -f $OutputDir)
+
+    # Width chosen to align the longest labels nicely
+    $labelWidth = 20
+
+    Write-BannerLine -Label "Provider"      -Value $Provider    -LabelWidth $labelWidth
+    Write-BannerLine -Label "WarmRepeats"   -Value $Repeats     -LabelWidth $labelWidth
+    Write-BannerLine -Label "PromptCount"   -Value $PromptCount -LabelWidth $labelWidth
+    Write-BannerLine -Label "OutputDir"     -Value $OutputDir   -LabelWidth $labelWidth
+
     if ($Provider -eq "ollama" -or $Provider -eq "all") {
-        Write-Host ("OllamaBaseUrl   : {0}" -f $OllamaBaseUrl)
+        Write-BannerLine -Label "OllamaBaseUrl" -Value $OllamaBaseUrl -LabelWidth $labelWidth
     }
 
     if ($null -ne $SystemInfo) {
         if (-not [string]::IsNullOrWhiteSpace($SystemInfo.CpuName)) {
-            $cpuLine = $SystemInfo.CpuName
-            if ($null -ne $SystemInfo.CpuCores -or $null -ne $SystemInfo.CpuLogicalProcessors) {
-                $cpuLine = "{0} ({1}C/{2}T)" -f $SystemInfo.CpuName, $SystemInfo.CpuCores, $SystemInfo.CpuLogicalProcessors
-            }
-            Write-Host ("CPU             : {0}" -f $cpuLine)
+            $cpuNameNorm = ($SystemInfo.CpuName -replace '\s+', ' ').Trim()
+
+			$cpuLine = $cpuNameNorm
+			if ($null -ne $SystemInfo.CpuCores -or $null -ne $SystemInfo.CpuLogicalProcessors) {
+				$cpuLine = "{0} ({1}C/{2}T)" -f $cpuNameNorm, $SystemInfo.CpuCores, $SystemInfo.CpuLogicalProcessors
+			}
+
+			Write-BannerLine -Label "CPU" -Value $cpuLine -LabelWidth $labelWidth
         }
 
         if ($null -ne $SystemInfo.InstalledRamGB) {
-            Write-Host ("Installed RAM   : {0} GB" -f $SystemInfo.InstalledRamGB)
+            Write-BannerLine -Label "Installed RAM" -Value ("{0:N2} GB" -f [double]$SystemInfo.InstalledRamGB) -LabelWidth $labelWidth
         }
 
         if ($null -ne $SystemInfo.UsableRamGB) {
-            Write-Host ("Usable RAM      : {0} GB" -f $SystemInfo.UsableRamGB)
+            Write-BannerLine -Label "Usable RAM" -Value ("{0:N2} GB" -f [double]$SystemInfo.UsableRamGB) -LabelWidth $labelWidth
+        }
+
+        if ($null -ne $SystemInfo.HardwareReservedRamGB) {
+            Write-BannerLine -Label "Hardware Reserved" -Value ("{0:N2} GB" -f [double]$SystemInfo.HardwareReservedRamGB) -LabelWidth $labelWidth
         }
 
         if (-not [string]::IsNullOrWhiteSpace($SystemInfo.OsCaption)) {
@@ -471,45 +513,37 @@ function Show-StartupBanner {
             if (-not [string]::IsNullOrWhiteSpace($SystemInfo.OsBuild)) {
                 $osLine += " (Build " + $SystemInfo.OsBuild + ")"
             }
-            Write-Host ("OS              : {0}" -f $osLine)
+            Write-BannerLine -Label "OS" -Value $osLine -LabelWidth $labelWidth
         }
 
         $gpuIndex = 1
         foreach ($gpu in @($SystemInfo.Gpus)) {
             if ([string]::IsNullOrWhiteSpace($gpu.Name)) { continue }
 
-            if ($gpuIndex -eq 1) {
-                Write-Host ("GPU             : {0}" -f $gpu.Name)
-            }
-            else {
-                Write-Host ("GPU {0}           : {1}" -f $gpuIndex, $gpu.Name)
-            }
+            $gpuLabel = if ($gpuIndex -eq 1) { "GPU" } else { "GPU $gpuIndex" }
+            Write-BannerLine -Label $gpuLabel -Value $gpu.Name -LabelWidth $labelWidth
 
             if ($null -ne $gpu.DedicatedVRAMGB) {
-                if ($gpuIndex -eq 1) {
-                    Write-Host ("Dedicated VRAM  : {0} GB" -f $gpu.DedicatedVRAMGB)
-                }
-                else {
-                    Write-Host ("GPU {0} VRAM      : {1} GB" -f $gpuIndex, $gpu.DedicatedVRAMGB)
-                }
+                $dedLabel = if ($gpuIndex -eq 1) { "Dedicated VRAM" } else { "GPU $gpuIndex VRAM" }
+                Write-BannerLine -Label $dedLabel -Value ("{0:N2} GB" -f [double]$gpu.DedicatedVRAMGB) -LabelWidth $labelWidth
             }
 
             if ($null -ne $gpu.SharedVRAMGB) {
-                if ($gpuIndex -eq 1) {
-                    Write-Host ("Shared VRAM     : {0} GB" -f $gpu.SharedVRAMGB)
+                $sharedLabel = "Shared VRAM"
+                if ($gpu.PSObject.Properties.Name -contains "SharedVRAMIsEstimated" -and $gpu.SharedVRAMIsEstimated) {
+                    $sharedLabel = "Shared VRAM (est.)"
                 }
-                else {
-                    Write-Host ("GPU {0} Shared    : {1} GB" -f $gpuIndex, $gpu.SharedVRAMGB)
+
+                if ($gpuIndex -ne 1) {
+                    $sharedLabel = "GPU $gpuIndex $sharedLabel"
                 }
+
+                Write-BannerLine -Label $sharedLabel -Value ("{0:N2} GB" -f [double]$gpu.SharedVRAMGB) -LabelWidth $labelWidth
             }
 
             if ($gpu.IsIntegrated) {
-                if ($gpuIndex -eq 1) {
-                    Write-Host "GPU Memory Type : Integrated / shared system memory (UMA; shared amount is a usable system memory pool, not permanently allocated VRAM)"
-                }
-                else {
-                    Write-Host ("GPU {0} Type      : Integrated / shared system memory (UMA)" -f $gpuIndex)
-                }
+                $typeLabel = if ($gpuIndex -eq 1) { "GPU Memory Type" } else { "GPU $gpuIndex Type" }
+                Write-BannerLine -Label $typeLabel -Value "Integrated / shared system memory (UMA; shared amount is a usable system memory pool, not permanently allocated VRAM)" -LabelWidth $labelWidth
             }
 
             $gpuIndex++
@@ -517,11 +551,11 @@ function Show-StartupBanner {
     }
 
     if ($OllamaModels.Count -gt 0) {
-        Write-Host ("OllamaModels    : {0}" -f ($OllamaModels -join ", "))
+        Write-BannerLine -Label "OllamaModels" -Value ($OllamaModels -join ", ") -LabelWidth $labelWidth
     }
 
     if ($LmsModels.Count -gt 0) {
-        Write-Host ("LmsModels       : {0}" -f ($LmsModels -join ", "))
+        Write-BannerLine -Label "LmsModels" -Value ($LmsModels -join ", ") -LabelWidth $labelWidth
     }
 
     Write-Host ""
