@@ -3,7 +3,7 @@
 Benchmarks local language models using:
 
 - Ollama HTTP API
-- LM Studio CLI (`lms`)
+- LM Studio HTTP API
 
 It runs one cold-start measurement per model, then runs a warm prompt suite and produces:
 
