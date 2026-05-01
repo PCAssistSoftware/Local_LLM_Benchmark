@@ -1045,7 +1045,7 @@ function Get-LmsModels {
 function Invoke-LmsLoad {
     param([string]$Model)
     $escapedModel = Escape-CmdArgument -Value $Model
-    Invoke-CmdCapture -Command "lms load `"$escapedModel`"" -TimeoutSec 60
+    Invoke-CmdCapture -Command "lms load `"$escapedModel`" --gpu max --context-length 32768" -TimeoutSec 120
 }
 
 function Invoke-LmsUnload {
