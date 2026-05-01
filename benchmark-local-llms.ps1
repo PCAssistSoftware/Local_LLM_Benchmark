@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Benchmarks local LLMs using Ollama and/or LM Studio CLI.
+Benchmarks local LLMs using Ollama and/or LM Studio.
 
 .DESCRIPTION
 Runs a benchmark suite against locally installed language models using:
