@@ -90,7 +90,7 @@ Each warm prompt gets a `QualityScore` based on its scoring rule:
   Heuristic check for a correct Python `factorial(n)` function. Accepts recursive (`factorial(n - 1)`) and iterative (loop-based) implementations. Recursive implementations must include an explicit base case (`n == 0`, `n == 1`, or `n <= 1`); iterative implementations do not require one, since a loop from `2` to `n + 1` with a multiplication accumulator is correct without an explicit branch. Partial credit if the function signature is present but logic is missing.
 
 - `js_clamp`  
-  Heuristic check for a correct JavaScript `clamp(value, min, max)` function. Accepts `Math.min(Math.max(...))`, `if/else` branching, or ternary implementations. Partial credit if the function signature is present but logic is missing.
+  Heuristic check for a correct JavaScript `clamp(value, min, max)` function. Accepts `Math.min(Math.max(...))` or `Math.max(min, Math.min(...))`, `if/else` branching, or ternary implementations. Partial credit if the function signature is present but logic is missing.
 
 All outputs are normalised before scoring: ANSI escape sequences and `<think>...</think>` blocks (emitted by reasoning models) are stripped, and surrounding code fences are removed.
 
