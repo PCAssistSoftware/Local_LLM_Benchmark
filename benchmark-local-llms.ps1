@@ -5,7 +5,7 @@ Benchmarks local LLMs using Ollama and/or LM Studio CLI.
 .DESCRIPTION
 Runs a benchmark suite against locally installed language models using:
 - Ollama HTTP API
-- LM Studio CLI (lms)
+- LM Studio REST API (http://localhost:1234/v1/chat/completions) for benchmarking; lms CLI for model load/unload only
 
 Cold startup is measured once per model.
 All scored benchmark prompts are then run warm.
@@ -47,11 +47,13 @@ param(
     [ValidateRange(1, 100)]
     [int]$Repeats = 3,
 
-    [int]$TimeoutSec = 180,
+    [int]$TimeoutSec = 600,
 
     [string]$OutputDir = ".\results",
 
     [string]$OllamaBaseUrl = "http://localhost:11434",
+	
+	[string]$LmsBaseUrl = "http://localhost:1234",
 
     [switch]$AutoDetectLmsModels,
     [switch]$AutoDetectOllamaModels,
@@ -100,7 +102,7 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id           = "json_01"
         Category     = "json"
-        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: animal, sound. Values should describe a cat."
+        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: animal, sound. Use exactly these values: animal = cat, sound = meow."
         ScoreType    = "json_keys"
         ExpectedJson = @{
             animal   = "cat"
@@ -656,7 +658,10 @@ function Get-QualityScore {
                 $normalized -match 'function\s+clamp\s*\(' -or
                 $normalized -match '(?:const|let|var)\s+clamp\s*='
             )
-            $hasMathClamp = $normalized -match 'Math\.min\s*\(\s*Math\.max\s*\(\s*value\s*,\s*min\s*\)\s*,\s*max\s*\)'
+            $hasMathClamp = (
+                $normalized -match 'Math\.min\s*\(\s*Math\.max\s*\(\s*value\s*,\s*min\s*\)\s*,\s*max\s*\)' -or
+                $normalized -match 'Math\.max\s*\(\s*min\s*,\s*Math\.min\s*\(\s*value\s*,\s*max\s*\)\s*\)'
+            )
             $hasBranching = (
                 ($normalized -match '\bif\b') -and
                 ($normalized -match 'return\s+min') -and
@@ -710,12 +715,13 @@ function Get-QualityScore {
                 if ($obj.PSObject.Properties.Name -contains $key) {
                     $score += 50.0 / $keys.Count
 
-                    $actualValue = [string]$obj.$key
-                    $expectedValue = [string]$expected[$key]
+					$actualValue = [string]$obj.$key
+					$expectedValue = [string]$expected[$key]
 
-                    if ($actualValue -eq $expectedValue) {
-                        $score += 50.0 / $keys.Count
-                    }
+					if ($actualValue -eq $expectedValue -or
+						$actualValue -match [regex]::Escape($expectedValue)) {
+						$score += 50.0 / $keys.Count
+					}
                 }
             }
 
@@ -828,30 +834,19 @@ function Invoke-OllamaBenchmark {
         $sw.Stop()
 
         $text = Normalize-ModelOutput -Text ([string]$resp.response)
-        $outputTokens = Estimate-TokenCount -Text $text
+
+        $outputTokens = 0
+        if ($resp.eval_count) { $outputTokens = [int]$resp.eval_count }
+        if ($outputTokens -le 0) { $outputTokens = Estimate-TokenCount -Text $text }
+
+        $promptTokens = $null
+        if ($resp.prompt_eval_count) { $promptTokens = [int]$resp.prompt_eval_count }
+
         $totalMs = [int]$sw.ElapsedMilliseconds
-
-        $evalCount = 0
-        if ($null -ne $resp.eval_count) { $evalCount = [int]$resp.eval_count }
-        if ($evalCount -le 0) { $evalCount = $outputTokens }
-
-        $evalDurationNs = 0.0
-        if ($null -ne $resp.eval_duration) { $evalDurationNs = [double]$resp.eval_duration }
-
-        $loadDurationNs = 0.0
-        if ($null -ne $resp.load_duration) { $loadDurationNs = [double]$resp.load_duration }
-
-        $promptEvalNs = 0.0
-        if ($null -ne $resp.prompt_eval_duration) { $promptEvalNs = [double]$resp.prompt_eval_duration }
-
-        $promptEvalCount = 0
-        if ($null -ne $resp.prompt_eval_count) { $promptEvalCount = [int]$resp.prompt_eval_count }
-
         $tokensPerSec = 0.0
-        if ($evalDurationNs -gt 0 -and $evalCount -gt 0) {
-            $tokensPerSec = [Math]::Round(($evalCount / ($evalDurationNs / 1e9)), 2)
-        }
-        elseif ($totalMs -gt 0 -and $outputTokens -gt 0) {
+        if ($resp.eval_duration -and $resp.eval_count -and [long]$resp.eval_duration -gt 0) {
+            $tokensPerSec = [Math]::Round(([int]$resp.eval_count / ([long]$resp.eval_duration / 1e9)), 2)
+        } elseif ($totalMs -gt 0 -and $outputTokens -gt 0) {
             $tokensPerSec = [Math]::Round(($outputTokens / ($totalMs / 1000.0)), 2)
         }
 
@@ -862,15 +857,15 @@ function Invoke-OllamaBenchmark {
             ColdStart    = $ColdStart
             OutputText   = $text
             OutputTokens = $outputTokens
-            PromptTokens = $promptEvalCount
+            PromptTokens = $promptTokens
             TotalMs      = $totalMs
-            LoadMs       = [Math]::Round($loadDurationNs / 1e6, 2)
-            PromptEvalMs = [Math]::Round($promptEvalNs / 1e6, 2)
-            TTFTMs       = $(if ($loadDurationNs -gt 0 -and $promptEvalNs -gt 0) { [Math]::Round(($loadDurationNs + $promptEvalNs) / 1e6, 2) } else { $null })
+            LoadMs       = $null
+            PromptEvalMs = $null
+            TTFTMs       = $null
             TokensPerSec = $tokensPerSec
             Error        = $null
             StartedAtMs  = $startedMs
-            Raw          = $resp
+            Raw          = ($resp | ConvertTo-Json -Depth 5 -Compress)
         }
     }
     catch {
@@ -880,11 +875,9 @@ function Invoke-OllamaBenchmark {
         if ([string]::IsNullOrWhiteSpace($msg)) {
             $msg = "Unknown Ollama error."
         }
-
         if ($msg -match '500\)\s*Internal Server Error') {
             $msg += " Possible causes: insufficient available RAM/VRAM, model load failure, or Ollama runtime instability. Check whether other large models are still loaded, free memory, or rerun the model individually."
         }
-
         if ($msg -match '(?i)requires more system memory|insufficient memory|out of memory|not enough memory') {
             $msg += " Memory-related Ollama failure detected. Try unloading other models, restarting Ollama, closing LM Studio, or benchmarking large models separately."
         }
@@ -1045,7 +1038,7 @@ function Get-LmsModels {
 function Invoke-LmsLoad {
     param([string]$Model)
     $escapedModel = Escape-CmdArgument -Value $Model
-    Invoke-CmdCapture -Command "lms load `"$escapedModel`" --gpu max --context-length 32768" -TimeoutSec 120
+    Invoke-CmdCapture -Command "lms load `"$escapedModel`" --gpu max" -TimeoutSec 120
 }
 
 function Invoke-LmsUnload {
@@ -1059,77 +1052,6 @@ function Invoke-LmsUnload {
     }
 }
 
-function Parse-LmsStats {
-    param(
-        [string]$Text,
-        [int]$FallbackTotalMs,
-        [int]$FallbackOutputTokens
-    )
-
-    $tokensPerSec = $null
-    $loadMs = $null
-    $ttftMs = $null
-    $promptEvalMs = $null
-    $promptTokens = $null
-    $predictedTokens = $null
-    $totalTokens = $null
-
-    if ($Text -match '(?i)Tokens\/Second:\s*([0-9]+(?:\.[0-9]+)?)') {
-        $tokensPerSec = [double]$matches[1]
-    }
-    elseif ($Text -match '(?i)([0-9]+(?:\.[0-9]+)?)\s*(?:tokens\/s|tok\/s|t\/s)') {
-        $tokensPerSec = [double]$matches[1]
-    }
-
-    if ($Text -match '(?i)Time to First Token:\s*([0-9]+(?:\.[0-9]+)?)s') {
-        $ttftMs = [Math]::Round(([double]$matches[1]) * 1000.0, 2)
-    }
-    elseif ($Text -match '(?i)(ttft|first token)[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*ms') {
-        $ttftMs = [double]$matches[2]
-    }
-
-    if ($Text -match '(?i)Prompt Tokens:\s*([0-9]+)') {
-        $promptTokens = [int]$matches[1]
-    }
-
-    if ($Text -match '(?i)Predicted Tokens:\s*([0-9]+)') {
-        $predictedTokens = [int]$matches[1]
-    }
-
-    if ($Text -match '(?i)Total Tokens:\s*([0-9]+)') {
-        $totalTokens = [int]$matches[1]
-    }
-
-    if ($Text -match '(?i)load[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*ms') {
-        $loadMs = [double]$matches[1]
-    }
-
-    if ($Text -match '(?i)prompt eval[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*ms') {
-        $promptEvalMs = [double]$matches[1]
-    }
-
-    if ($null -eq $tokensPerSec -and $FallbackTotalMs -gt 0) {
-        $tokenBase = $FallbackOutputTokens
-        if ($null -ne $predictedTokens -and $predictedTokens -gt 0) {
-            $tokenBase = $predictedTokens
-        }
-
-        if ($tokenBase -gt 0) {
-            $tokensPerSec = [Math]::Round(($tokenBase / ($FallbackTotalMs / 1000.0)), 2)
-        }
-    }
-
-    [pscustomobject]@{
-        TokensPerSec    = $tokensPerSec
-        LoadMs          = $loadMs
-        TTFTMs          = $ttftMs
-        PromptEvalMs    = $promptEvalMs
-        PromptTokens    = $promptTokens
-        PredictedTokens = $predictedTokens
-        TotalTokens     = $totalTokens
-    }
-}
-
 function Invoke-LmsBenchmark {
     param(
         [string]$Model,
@@ -1140,10 +1062,7 @@ function Invoke-LmsBenchmark {
         [int]$ColdStartLoadMs   = 500
     )
 
-    if (-not (Test-CommandExists -Name "lms")) {
-        throw "LM Studio CLI ('lms') was not found in PATH. Install LM Studio CLI or adjust PATH."
-    }
-
+    # Cold start: unload then reload with GPU settings before timing
     if ($ColdStart) {
         Invoke-LmsUnload -Model $Model
         Start-Sleep -Milliseconds $ColdStartUnloadMs
@@ -1155,42 +1074,50 @@ function Invoke-LmsBenchmark {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
-        $escapedModel  = Escape-CmdArgument -Value $Model
-        $escapedPrompt = Escape-CmdArgument -Value $Prompt
+        $bodyObject = @{
+            model       = $Model
+            messages    = @(
+                @{ role = "system"; content = "You are a helpful assistant." }
+                @{ role = "user";   content = $Prompt }
+            )
+            temperature = 0
+            stream      = $false
+			max_tokens  = 16384
+        }
 
-        $result = Invoke-CmdCapture -Command "lms chat `"$escapedModel`" --prompt `"$escapedPrompt`" --stats" -TimeoutSec $TimeoutSec
+        $body = $bodyObject | ConvertTo-Json -Depth 8 -Compress
+
+        $resp = Invoke-RestMethod `
+            -Uri "$LmsBaseUrl/v1/chat/completions" `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $body `
+            -TimeoutSec $TimeoutSec
+
         $sw.Stop()
-
-        $fullText = $result.Output
-        if ([string]::IsNullOrWhiteSpace($fullText)) {
-            $fullText = "<no output captured>"
-        }
-
-        if ($result.ExitCode -ne 0) {
-            throw "lms exited with code $($result.ExitCode). Output: $fullText"
-        }
-
         $totalMs = [int]$sw.ElapsedMilliseconds
 
-        $parts = $fullText -split '(?im)^\s*Prediction Stats:\s*$'
-        if ($parts.Count -ge 2) {
-            $responseText = Normalize-ModelOutput -Text (($parts[0]).Trim())
-            $statsText = ($parts[1]).Trim()
-        }
-        else {
-            $responseText = Normalize-ModelOutput -Text $fullText
-            $statsText = $fullText
-        }
+        $rawText   = [string]$resp.choices[0].message.content
+        $outputText = Normalize-ModelOutput -Text $rawText
 
-        if ([string]::IsNullOrWhiteSpace($responseText)) {
-            $responseText = Normalize-ModelOutput -Text $fullText
+        $outputTokens = 0
+        if ($null -ne $resp.usage -and $null -ne $resp.usage.completion_tokens) {
+            $outputTokens = [int]$resp.usage.completion_tokens
+        }
+        if ($outputTokens -le 0) {
+            $outputTokens = Estimate-TokenCount -Text $outputText
         }
 
-        $outputTokens = Estimate-TokenCount -Text $responseText
-        $stats = Parse-LmsStats -Text $statsText -FallbackTotalMs $totalMs -FallbackOutputTokens $outputTokens
+        $promptTokens = $null
+        if ($null -ne $resp.usage -and $null -ne $resp.usage.prompt_tokens) {
+            $promptTokens = [int]$resp.usage.prompt_tokens
+        }
 
-        if ($null -ne $stats.PredictedTokens -and $stats.PredictedTokens -gt 0) {
-            $outputTokens = $stats.PredictedTokens
+        # Tokens/sec from wall-clock time (includes prompt eval — consistent
+        # with Ollama fallback path and fair for cross-provider comparison)
+        $tokensPerSec = 0.0
+        if ($totalMs -gt 0 -and $outputTokens -gt 0) {
+            $tokensPerSec = [Math]::Round(($outputTokens / ($totalMs / 1000.0)), 2)
         }
 
         [pscustomobject]@{
@@ -1198,33 +1125,33 @@ function Invoke-LmsBenchmark {
             Model        = $Model
             Success      = $true
             ColdStart    = $ColdStart
-            OutputText   = $responseText
+            OutputText   = $outputText
             OutputTokens = $outputTokens
-            PromptTokens = $stats.PromptTokens
+            PromptTokens = $promptTokens
             TotalMs      = $totalMs
-            LoadMs       = $stats.LoadMs
-            PromptEvalMs = $stats.PromptEvalMs
-            TTFTMs       = $stats.TTFTMs
-            TokensPerSec = $(if ($null -ne $stats.TokensPerSec) { [double]$stats.TokensPerSec } else { 0.0 })
+            LoadMs       = $null
+            PromptEvalMs = $null
+            TTFTMs       = $null
+            TokensPerSec = $tokensPerSec
             Error        = $null
             StartedAtMs  = $startedMs
-            Raw          = $fullText
+            Raw          = ($resp | ConvertTo-Json -Depth 5 -Compress)
         }
     }
     catch {
         $sw.Stop()
 
         $msg = $_.Exception.Message
-        if ([string]::IsNullOrWhiteSpace($msg)) {
-            $msg = "Unknown LMS error."
-        }
+        if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Unknown LMS error." }
 
-        if ($msg -match '(?i)timed out after') {
-            $msg += " Possible causes: slow generation, model stall, or local CPU/GPU/memory pressure. Consider increasing -TimeoutSec, rerunning the model individually, or checking whether LM Studio is under heavy load."
+        if ($msg -match '(?i)timed out|operation has timed out') {
+            $msg += " Consider increasing -TimeoutSec or checking LM Studio server is running on $LmsBaseUrl."
         }
-
         if ($msg -match '(?i)out of memory|not enough memory|insufficient memory') {
-            $msg += " Memory-related LM Studio failure detected. Try unloading other models, reducing concurrent runtime usage, or benchmarking large models separately."
+            $msg += " Memory-related failure. Try unloading other models first."
+        }
+        if ($msg -match '(?i)unable to connect|connection refused|No connection') {
+            $msg += " LM Studio server not reachable at $LmsBaseUrl. Ensure LM Studio is open and the server is started in the Developer tab."
         }
 
         [pscustomobject]@{
