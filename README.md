@@ -2,8 +2,8 @@
 
 Benchmarks local language models using:
 
-- Ollama HTTP API
-- LM Studio HTTP API
+- Ollama HTTP API (`/api/generate`)
+- LM Studio REST API (`/v1/chat/completions`); `lms` CLI used only for model load/unload
 
 It runs one cold-start measurement per model, then runs a warm prompt suite and produces:
 
@@ -123,6 +123,7 @@ OverallScore = (0.75 × AvgQualityScore) + (0.15 × SpeedScore) + (0.10 × Relia
 - `SpeedScore` shifts when models are added or removed from a run, since it is normalised relative to the current set of models.
 - `ReliabilityScore` is simply equal to `SuccessRate` and does not shift unless the model's own failure rate changes.
 - Results can vary slightly between runs due to model non-determinism and system load.
+- Ollama benchmarks use `/api/generate` (completion endpoint, `temperature=0`). LM Studio benchmarks use `/v1/chat/completions` (chat endpoint, `temperature=0`, `max_tokens=16384`). Both use identical prompts. The endpoint difference is an intentional pragmatic choice — Ollama's chat completions endpoint triggers extended thinking in Qwen3-family MoE models, consuming all available tokens before producing output. The completion endpoint does not exhibit this behaviour.
 
 ## Example usage
 
@@ -141,9 +142,9 @@ OverallScore = (0.75 × AvgQualityScore) + (0.15 × SpeedScore) + (0.10 × Relia
 .\benchmark-local-llms.ps1 -Provider all -AutoDetectOllamaModels -AutoDetectLmsModels -Repeats 3 -OutputDir .\results-all
 ```
 
-### Specific models
+### With extended timeout (recommended for large thinking models)
 ```powershell
-.\benchmark-local-llms.ps1 -Provider ollama -OllamaModels "gemma4:e2b","gemma4:e4b","gemma4:26b" -Repeats 3 -OutputDir .\results-subset
+.\benchmark-local-llms.ps1 -Provider all -AutoDetectOllamaModels -AutoDetectLmsModels -Repeats 3 -TimeoutSec 600 -OutputDir .\results-all
 ```
 
 ## Viewing results in GridView
@@ -209,7 +210,3 @@ Import-Csv .\results\raw-results.csv |
 ## Raw results fields
 
 Raw results include a `RunTimestampUtc` field in ISO UTC format (example: `2026-03-30T18:42:15Z`), making it easy to sort and compare rows across runs.
-
-
-## Screenshots
-![Screenshot of results in console and gridview.](/screenshot.png)
