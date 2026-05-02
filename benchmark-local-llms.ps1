@@ -225,19 +225,18 @@ function Estimate-TokenCount {
 
 function Normalize-ModelOutput {
     param([string]$Text)
-
     if ([string]::IsNullOrWhiteSpace($Text)) {
         return ""
     }
-
     $clean = $Text
     $clean = [regex]::Replace($clean, '\x1B\[[0-9;?]*[ -/]*[@-~]', '')
-    # Strip <think>...</think> blocks emitted by reasoning models before scoring
+    # Strip closed <think>...</think> blocks emitted by reasoning models
     $clean = [regex]::Replace($clean, '(?si)<think>.*?</think>', '')
+    # Strip unclosed <think> blocks (when token limit is hit mid-thought)
+    $clean = [regex]::Replace($clean, '(?si)<think>.*$', '')
     $clean = $clean.Trim()
     $clean = [regex]::Replace($clean, '^\s*```[a-zA-Z0-9_-]*\s*', '')
     $clean = [regex]::Replace($clean, '\s*```\s*$', '')
-
     return $clean.Trim()
 }
 
@@ -659,9 +658,10 @@ function Get-QualityScore {
                 $normalized -match '(?:const|let|var)\s+clamp\s*='
             )
             $hasMathClamp = (
-                $normalized -match 'Math\.min\s*\(\s*Math\.max\s*\(\s*value\s*,\s*min\s*\)\s*,\s*max\s*\)' -or
-                $normalized -match 'Math\.max\s*\(\s*min\s*,\s*Math\.min\s*\(\s*value\s*,\s*max\s*\)\s*\)'
-            )
+				$normalized -match 'Math\.min\s*\(\s*Math\.max\s*\(\s*value\s*,\s*min\s*\)\s*,\s*max\s*\)' -or
+				$normalized -match 'Math\.max\s*\(\s*min\s*,\s*Math\.min\s*\(\s*value\s*,\s*max\s*\)\s*\)' -or
+				$normalized -match 'Math\.max\s*\(\s*min\s*,\s*Math\.min\s*\(\s*max\s*,\s*value\s*\)\s*\)'
+			)
             $hasBranching = (
                 ($normalized -match '\bif\b') -and
                 ($normalized -match 'return\s+min') -and
@@ -1062,7 +1062,6 @@ function Invoke-LmsBenchmark {
         [int]$ColdStartLoadMs   = 500
     )
 
-    # Cold start: unload then reload with GPU settings before timing
     if ($ColdStart) {
         Invoke-LmsUnload -Model $Model
         Start-Sleep -Milliseconds $ColdStartUnloadMs
@@ -1077,12 +1076,11 @@ function Invoke-LmsBenchmark {
         $bodyObject = @{
             model       = $Model
             messages    = @(
-                @{ role = "system"; content = "You are a helpful assistant." }
-                @{ role = "user";   content = $Prompt }
-            )
+				@{ role = "user"; content = $Prompt }
+			)
             temperature = 0
+            max_tokens  = 32768
             stream      = $false
-			max_tokens  = 16384
         }
 
         $body = $bodyObject | ConvertTo-Json -Depth 8 -Compress
@@ -1097,7 +1095,7 @@ function Invoke-LmsBenchmark {
         $sw.Stop()
         $totalMs = [int]$sw.ElapsedMilliseconds
 
-        $rawText   = [string]$resp.choices[0].message.content
+        $rawText    = [string]$resp.choices[0].message.content
         $outputText = Normalize-ModelOutput -Text $rawText
 
         $outputTokens = 0
@@ -1113,8 +1111,6 @@ function Invoke-LmsBenchmark {
             $promptTokens = [int]$resp.usage.prompt_tokens
         }
 
-        # Tokens/sec from wall-clock time (includes prompt eval — consistent
-        # with Ollama fallback path and fair for cross-provider comparison)
         $tokensPerSec = 0.0
         if ($totalMs -gt 0 -and $outputTokens -gt 0) {
             $tokensPerSec = [Math]::Round(($outputTokens / ($totalMs / 1000.0)), 2)
