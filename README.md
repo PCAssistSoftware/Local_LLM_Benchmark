@@ -123,7 +123,8 @@ OverallScore = (0.75 × AvgQualityScore) + (0.15 × SpeedScore) + (0.10 × Relia
 - `SpeedScore` shifts when models are added or removed from a run, since it is normalised relative to the current set of models.
 - `ReliabilityScore` is simply equal to `SuccessRate` and does not shift unless the model's own failure rate changes.
 - Results can vary slightly between runs due to model non-determinism and system load.
-- Ollama benchmarks use `/api/generate` (completion endpoint, `temperature=0`). LM Studio benchmarks use `/v1/chat/completions` (chat endpoint, `temperature=0`, `max_tokens=16384`). Both use identical prompts. The endpoint difference is an intentional pragmatic choice — Ollama's chat completions endpoint triggers extended thinking in Qwen3-family MoE models, consuming all available tokens before producing output. The completion endpoint does not exhibit this behaviour.
+- Ollama benchmarks use `/api/generate` (completion endpoint, `temperature=0`, no system prompt). LM Studio benchmarks use `/v1/chat/completions` (chat endpoint, `temperature=0`, `max_tokens=32768`, no system prompt). Both use identical prompts. The endpoint difference is an intentional pragmatic choice — Ollama's `/v1/chat/completions` endpoint triggers extended thinking in Qwen3-family MoE models, exhausting the token budget before producing output; `/api/generate` does not. Removing the system prompt on LMS requests was equally important — it significantly reduces Qwen3 thinking token consumption and keeps generation times within the timeout budget.
+- Output normalisation strips ANSI sequences, closed `<think>...</think>` blocks, and unclosed `<think>` blocks (which occur when a thinking model hits the token limit mid-reasoning).
 
 ## Example usage
 
