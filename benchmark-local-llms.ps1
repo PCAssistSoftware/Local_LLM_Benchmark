@@ -7,21 +7,26 @@ Runs a benchmark suite against locally installed language models using:
 - Ollama HTTP API
 - LM Studio REST API (http://localhost:1234/v1/chat/completions) for benchmarking; lms CLI for model load/unload only
 
-Cold startup is measured once per model.
-All scored benchmark prompts are then run warm.
+Cold startup is measured once per model. Provider semantics differ:
+- Ollama: wall-clock from unload + post-unload sleep through the full /api/generate response. When the API returns load_duration, LoadMs is that model-load phase in ms (not client unload/sleep).
+- LM Studio: wall-clock starts before lms unload. LoadMs is unload + configured sleeps + lms load, ending just before the HTTP request. TotalMs for that row is full cold time including chat completion.
+
+All scored benchmark prompts are then run warm (no lms load/unload between repeats).
 
 It measures:
-- success rate
-- initial load / total startup latency
+- success rate (warm runs only)
+- cold LoadMs and InitialTotalMs (startup row)
 - warm total latency
 - warm tokens per second
 - optional quality scores
 - category-level quality scores
 
+SpeedScore min/max normalization uses only models with warm SuccessRate > 0 so total failures do not skew relative speed ranking.
+
 Results are written to:
 - raw-results.json
 - raw-results.csv
-- leaderboard.csv
+- leaderboard.csv (includes ErrorSummary; 0% warm success models remain listed with OverallScore 0, SpeedScore 0, ReliabilityScore 0)
 - failures.csv (only when failures occur)
 - system-info.json
 - summary-report.md
@@ -81,54 +86,84 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id           = "reasoning_01"
         Category     = "reasoning"
-        Prompt       = "A £50 item is discounted by 20%, then 10% tax is added to the discounted price. What is the final price? Answer with just the number."
+        Prompt       = "A product costs 120. First apply a 25% discount, then add 8% tax, then subtract a fixed coupon of 5. What is the final price? Answer with only the number using at most 2 decimals."
         ScoreType    = "exact"
-        ExpectedText = "44"
+        ExpectedText = "92.2"
     },
     [pscustomobject]@{
         Id           = "reasoning_02"
         Category     = "reasoning"
-        Prompt       = "Alice is taller than Bob. Bob is taller than Carol. Who is the shortest of the three? Answer with just the name."
+        Prompt       = "Three tasks have durations: A=35 min, B=50 min, C=40 min. A and C can run in parallel, B starts only after both finish. What is total completion time in minutes? Answer with just the number."
         ScoreType    = "exact"
-        ExpectedText = "Carol"
+        ExpectedText = "90"
     },
     [pscustomobject]@{
         Id           = "reasoning_03"
         Category     = "reasoning"
-        Prompt       = "What is the next number in this sequence: 1, 1, 2, 3, 5, 8, ? Answer with just the number."
+        Prompt       = "A basket has 6 red, 4 blue, and 5 green balls. Two balls are drawn without replacement. What is the probability both are red? Return as a simplified fraction only."
         ScoreType    = "exact"
-        ExpectedText = "13"
+        ExpectedText = "1/7"
+    },
+    [pscustomobject]@{
+        Id           = "reasoning_04"
+        Category     = "reasoning"
+        Prompt       = "Find x: 3x + 7 = 2x + 19. Return only the integer value."
+        ScoreType    = "exact"
+        ExpectedText = "12"
     },
     [pscustomobject]@{
         Id           = "json_01"
         Category     = "json"
-        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: animal, sound. Use exactly these values: animal = cat, sound = meow."
+        Prompt       = 'Return ONLY minified JSON object with exactly these keys and values: {"user":"sam","age":29,"active":true}. No markdown, no extra text.'
         ScoreType    = "json_keys"
         ExpectedJson = @{
-            animal   = "cat"
-            sound    = "meow"
+            user   = "sam"
+            age    = 29
+            active = $true
         }
+        RequireExactKeys = $true
+        ForbidExtraText  = $true
     },
     [pscustomobject]@{
         Id           = "json_02"
         Category     = "json"
-        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: planet, position. Use Earth and 3."
+        Prompt       = "Return ONLY minified JSON with exactly keys items,total,currency and values items=3,total=19.95,currency=USD."
         ScoreType    = "json_keys"
         ExpectedJson = @{
-            planet   = "Earth"
-            position = "3"
+            items    = 3
+            total    = 19.95
+            currency = "USD"
         }
+        RequireExactKeys = $true
+        ForbidExtraText  = $true
     },
     [pscustomobject]@{
         Id           = "json_03"
         Category     = "json"
-        Prompt       = "Return ONLY raw minified JSON. No markdown, no code fences. Keys: city, country, continent. Values: Tokyo, Japan, Asia."
+        Prompt       = "Return ONLY minified JSON object for this invoice: id INV-104, paid false, due_date 2026-07-01, amount 2500. Use exact keys id,paid,due_date,amount."
         ScoreType    = "json_keys"
         ExpectedJson = @{
-            city      = "Tokyo"
-            country   = "Japan"
-            continent = "Asia"
+            id       = "INV-104"
+            paid     = $false
+            due_date = "2026-07-01"
+            amount   = 2500
         }
+        RequireExactKeys = $true
+        ForbidExtraText  = $true
+    },
+    [pscustomobject]@{
+        Id           = "json_04"
+        Category     = "json"
+        Prompt       = 'Return ONLY minified JSON object with keys name,roles,quota. Use name="sam", roles=["admin","editor"], quota=12.'
+        ScoreType    = "json_keys"
+        ExpectedJson = @{
+            name  = "sam"
+            roles = @("admin", "editor")
+            quota = 12
+        }
+        RequireExactKeys = $true
+        ForbidExtraText  = $true
+        ArrayOrderInsensitive = $true
     },
     [pscustomobject]@{
         Id           = "coding_01"
@@ -149,31 +184,49 @@ $PromptSuite = @(
         ScoreType    = "python_factorial"
     },
     [pscustomobject]@{
+        Id               = "coding_04"
+        Category         = "coding"
+        Prompt           = "Write a JavaScript function uniqueSorted(nums) that returns a new array of unique numbers sorted ascending. Do not include example usage."
+        ScoreType        = "code_contains"
+        RequiredSnippets = @(
+            "function uniqueSorted",
+            "new Set",
+            "sort"
+        )
+    },
+    [pscustomobject]@{
         Id            = "instruction_01"
         Category      = "instruction"
-        Prompt        = "Write only the plural of each of these words, comma-separated, nothing else: child, mouse, tooth"
-        ScoreType     = "regex"
-        ExpectedRegex = '^children,\s*mice,\s*teeth$'
+        Prompt        = "Return exactly this text and nothing else: READY-SET-GO"
+        ScoreType     = "exact"
+        ExpectedText  = "READY-SET-GO"
     },
     [pscustomobject]@{
         Id            = "instruction_02"
         Category      = "instruction"
-        Prompt        = "Sort these words alphabetically and return them as a comma-separated list, nothing else: banana, apple, cherry, date"
+        Prompt        = "Return only one line in this exact format: alpha=1;beta=2;gamma=3"
         ScoreType     = "regex"
-        ExpectedRegex = '^apple,\s*banana,\s*cherry,\s*date$'
+        ExpectedRegex = '^alpha=1;beta=2;gamma=3$'
     },
     [pscustomobject]@{
-        Id           = "instruction_03"
+        Id            = "instruction_03"
+        Category      = "instruction"
+        Prompt        = "Output exactly 3 words separated by single spaces: red green blue"
+        ScoreType     = "regex"
+        ExpectedRegex = '^red green blue$'
+    },
+    [pscustomobject]@{
+        Id           = "instruction_04"
         Category     = "instruction"
-        Prompt       = "Write only the Roman numeral for 14, nothing else."
+        Prompt       = "Write only the Roman numeral for 49, nothing else."
         ScoreType    = "exact"
-        ExpectedText = "XIV"
+        ExpectedText = "XLIX"
     },
     [pscustomobject]@{
         Id            = "summary_01"
         Category      = "summarization"
-        Prompt        = "Summarize this in exactly one sentence including the words coding, latency, JSON, and improved: OpenAI released a new model update that improved coding reliability, reduced latency, and made JSON output more consistent."
-        ScoreType     = "contains_all"
+        Prompt        = "Summarize in exactly one sentence and include all words: coding, latency, JSON, improved. Text: The release improved coding reliability, lowered latency, and made JSON output more consistent across tool calls."
+        ScoreType     = "contains_all_one_sentence"
         RequiredTerms = @(
             "coding",
             "latency",
@@ -184,8 +237,8 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id            = "summary_02"
         Category      = "summarization"
-        Prompt        = "Summarize this in exactly one sentence including the words budget, delay, testing, and release: The team delayed the release by one week to finish testing, stay within budget, and reduce the risk of post-launch defects."
-        ScoreType     = "contains_all"
+        Prompt        = "Summarize in exactly one sentence and include all words: budget, delay, testing, release. Text: The team delayed the release by one week to finish testing, remain within budget, and reduce post-launch defects."
+        ScoreType     = "contains_all_one_sentence"
         RequiredTerms = @(
             "budget",
             "delay",
@@ -196,14 +249,35 @@ $PromptSuite = @(
     [pscustomobject]@{
         Id            = "summary_03"
         Category      = "summarization"
-        Prompt        = "Summarize this in exactly one sentence including the words battery, range, charging, and electric: The new electric vehicle features an improved battery that extends the range to 400 miles and supports ultra-fast charging."
-        ScoreType     = "contains_all"
+        Prompt        = "Summarize in exactly one sentence and include all words: battery, range, charging, electric. Text: The new electric vehicle has an upgraded battery, extends range to 400 miles, and supports ultra-fast charging."
+        ScoreType     = "contains_all_one_sentence"
         RequiredTerms = @(
             "battery",
             "range",
             "charging",
             "electric"
         )
+    },
+    [pscustomobject]@{
+        Id            = "context_01"
+        Category      = "context"
+        Prompt        = "From this log extract only the request_id value. Log: ts=2026-05-01 level=INFO request_id=req-7f3a user=sam action=checkout amount=19.95 status=ok. Return only the request_id."
+        ScoreType     = "exact"
+        ExpectedText  = "req-7f3a"
+    },
+    [pscustomobject]@{
+        Id            = "context_02"
+        Category      = "context"
+        Prompt        = "Read carefully and answer with one word only: North region sold 120 units, South sold 150, East sold 150, West sold 90. Which region(s) had the highest sales? If tie, return the two names joined by a plus sign in alphabetical order."
+        ScoreType     = "exact"
+        ExpectedText  = "East+South"
+    },
+    [pscustomobject]@{
+        Id            = "context_03"
+        Category      = "context"
+        Prompt        = "Return only the ISO date that is exactly 10 days after 2026-01-21."
+        ScoreType     = "exact"
+        ExpectedText  = "2026-01-31"
     }
 )
 
@@ -594,6 +668,29 @@ function Get-QualityScore {
             return [Math]::Round((100.0 * $hits) / $required.Count, 2)
         }
 
+        "contains_all_one_sentence" {
+            $required = @($Test.RequiredTerms)
+            if ($required.Count -eq 0) { return 0 }
+
+            $hits = 0
+            foreach ($term in $required) {
+                if ($normalized -match [regex]::Escape([string]$term)) {
+                    $hits++
+                }
+            }
+
+            $baseScore = (100.0 * $hits) / $required.Count
+            $sentenceParts = @([regex]::Matches($normalized, '[^.!?]+[.!?]?'))
+            $nonEmptyParts = @($sentenceParts | ForEach-Object { $_.Value.Trim() } | Where-Object { $_ })
+            $isSingleSentence = ($nonEmptyParts.Count -eq 1)
+
+            if ($isSingleSentence) {
+                return [Math]::Round($baseScore, 2)
+            }
+
+            return [Math]::Round($baseScore * 0.6, 2)
+        }
+
         "python_is_palindrome" {
             $hasFunction = $normalized -match 'def\s+is_palindrome\s*\('
             $hasLower    = $normalized -match '\.lower\(\)|\.casefold\(\)'
@@ -710,18 +807,72 @@ function Get-QualityScore {
             $keys = @($expected.Keys)
             if ($keys.Count -eq 0) { return 0 }
 
+            if ($Test.PSObject.Properties.Name -contains "ForbidExtraText" -and $Test.ForbidExtraText) {
+                if (-not ($normalized -match '^\s*\{.*\}\s*$')) {
+                    return 0
+                }
+            }
+
+            if ($Test.PSObject.Properties.Name -contains "RequireExactKeys" -and $Test.RequireExactKeys) {
+                $actualKeys = @($obj.PSObject.Properties.Name)
+                if ($actualKeys.Count -ne $keys.Count) {
+                    return 0
+                }
+                foreach ($actualKey in $actualKeys) {
+                    if (-not ($keys -contains $actualKey)) {
+                        return 0
+                    }
+                }
+            }
+
             $score = 0.0
             foreach ($key in $keys) {
                 if ($obj.PSObject.Properties.Name -contains $key) {
                     $score += 50.0 / $keys.Count
 
-					$actualValue = [string]$obj.$key
-					$expectedValue = [string]$expected[$key]
+                    $actualRaw = $obj.$key
+                    $expectedRaw = $expected[$key]
 
-					if ($actualValue -eq $expectedValue -or
-						$actualValue -match [regex]::Escape($expectedValue)) {
-						$score += 50.0 / $keys.Count
-					}
+                    if ($expectedRaw -is [array]) {
+                        $actualArray = @($actualRaw)
+                        $expectedArray = @($expectedRaw)
+                        if ($actualArray.Count -eq $expectedArray.Count) {
+                            $same = $true
+                            $ignoreOrder = ($Test.PSObject.Properties.Name -contains "ArrayOrderInsensitive" -and $Test.ArrayOrderInsensitive)
+
+                            if ($ignoreOrder) {
+                                $actualNorm = @($actualArray | ForEach-Object { [string]$_ } | Sort-Object)
+                                $expectedNorm = @($expectedArray | ForEach-Object { [string]$_ } | Sort-Object)
+                                for ($i = 0; $i -lt $expectedNorm.Count; $i++) {
+                                    if ($actualNorm[$i] -ne $expectedNorm[$i]) {
+                                        $same = $false
+                                        break
+                                    }
+                                }
+                            }
+                            else {
+                                for ($i = 0; $i -lt $expectedArray.Count; $i++) {
+                                    if ([string]$actualArray[$i] -ne [string]$expectedArray[$i]) {
+                                        $same = $false
+                                        break
+                                    }
+                                }
+                            }
+
+                            if ($same) {
+                                $score += 50.0 / $keys.Count
+                            }
+                        }
+                    }
+                    else {
+                        $actualValue = [string]$actualRaw
+                        $expectedValue = [string]$expectedRaw
+
+                        if ($actualValue -eq $expectedValue -or
+                            $actualValue -match [regex]::Escape($expectedValue)) {
+                            $score += 50.0 / $keys.Count
+                        }
+                    }
                 }
             }
 
@@ -806,7 +957,9 @@ function Invoke-OllamaBenchmark {
         [int]$ColdStartWarmupMs = 400
     )
 
+    $sw = [System.Diagnostics.Stopwatch]::new()
     if ($ColdStart) {
+        $sw.Start()
         Invoke-OllamaUnload -BaseUrl $BaseUrl -Model $Model
         Start-Sleep -Milliseconds $ColdStartWarmupMs
     }
@@ -821,10 +974,12 @@ function Invoke-OllamaBenchmark {
     }
 
     $body = $bodyObject | ConvertTo-Json -Depth 8 -Compress
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    if (-not $sw.IsRunning) {
+        $sw.Start()
+    }
     $startedMs = Get-NowMs
 
-    try {
+   try {
         $resp = Invoke-RestMethod -Uri "$BaseUrl/api/generate" `
             -Method Post `
             -ContentType "application/json" `
@@ -850,6 +1005,11 @@ function Invoke-OllamaBenchmark {
             $tokensPerSec = [Math]::Round(($outputTokens / ($totalMs / 1000.0)), 2)
         }
 
+		$loadMs = $null
+        if ($resp.load_duration -and [long]$resp.load_duration -gt 0) {
+            $loadMs = [Math]::Round([long]$resp.load_duration / 1e6, 0)  # nanoseconds → milliseconds
+        }
+
         [pscustomobject]@{
             Provider     = "ollama"
             Model        = $Model
@@ -859,7 +1019,7 @@ function Invoke-OllamaBenchmark {
             OutputTokens = $outputTokens
             PromptTokens = $promptTokens
             TotalMs      = $totalMs
-            LoadMs       = $null
+            LoadMs       = $loadMs 
             PromptEvalMs = $null
             TTFTMs       = $null
             TokensPerSec = $tokensPerSec
@@ -1062,17 +1222,21 @@ function Invoke-LmsBenchmark {
         [int]$ColdStartLoadMs   = 500
     )
 
-    if ($ColdStart) {
-        Invoke-LmsUnload -Model $Model
-        Start-Sleep -Milliseconds $ColdStartUnloadMs
-        [void](Invoke-LmsLoad -Model $Model)
-        Start-Sleep -Milliseconds $ColdStartLoadMs
-    }
-
-    $startedMs = Get-NowMs
+    $startedMs = $null
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $loadMs = $null
 
     try {
+        if ($ColdStart) {
+            Invoke-LmsUnload -Model $Model
+            Start-Sleep -Milliseconds $ColdStartUnloadMs
+            [void](Invoke-LmsLoad -Model $Model)
+            Start-Sleep -Milliseconds $ColdStartLoadMs
+            $loadMs = [int]$sw.ElapsedMilliseconds
+        }
+
+        $startedMs = Get-NowMs
+
         $bodyObject = @{
             model       = $Model
             messages    = @(
@@ -1125,7 +1289,7 @@ function Invoke-LmsBenchmark {
             OutputTokens = $outputTokens
             PromptTokens = $promptTokens
             TotalMs      = $totalMs
-            LoadMs       = $null
+            LoadMs       = $loadMs
             PromptEvalMs = $null
             TTFTMs       = $null
             TokensPerSec = $tokensPerSec
@@ -1136,6 +1300,10 @@ function Invoke-LmsBenchmark {
     }
     catch {
         $sw.Stop()
+
+        if ($ColdStart -and $null -eq $loadMs) {
+            $loadMs = [int]$sw.ElapsedMilliseconds
+        }
 
         $msg = $_.Exception.Message
         if ([string]::IsNullOrWhiteSpace($msg)) { $msg = "Unknown LMS error." }
@@ -1159,7 +1327,7 @@ function Invoke-LmsBenchmark {
             OutputTokens = 0
             PromptTokens = $null
             TotalMs      = [int]$sw.ElapsedMilliseconds
-            LoadMs       = $null
+            LoadMs       = $loadMs
             PromptEvalMs = $null
             TTFTMs       = $null
             TokensPerSec = 0.0
@@ -1221,12 +1389,19 @@ function New-MarkdownReport {
     if ($null -ne $Leaderboard -and $Leaderboard.Count -gt 0) {
         $lines.Add("## Leaderboard")
         $lines.Add("")
-        $lines.Add("| Rank | Provider | Model | ModelSizeGB | Params | Quant | OverallScore | SpeedScore | AvgQualityScore | SuccessRate |")
-        $lines.Add("|---:|---|---|---:|---|---|---:|---:|---:|---:|")
+        $lines.Add("| Rank | Provider | Model | ModelSizeGB | Params | Quant | OverallScore | SpeedScore | AvgQualityScore | SuccessRate | ErrorSummary |")
+        $lines.Add("|---:|---|---|---:|---|---|---:|---:|---:|---:|---|")
 
         $rank = 1
         foreach ($row in $Leaderboard) {
-          $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} |" -f `
+            $errCell = ""
+            if ($row.PSObject.Properties.Name -contains "ErrorSummary" -and -not [string]::IsNullOrWhiteSpace($row.ErrorSummary)) {
+                $errCell = (($row.ErrorSummary -replace '\|', '/').Replace("`r", " ").Replace("`n", " "))
+                if ($errCell.Length -gt 200) {
+                    $errCell = $errCell.Substring(0, 200) + "…"
+                }
+            }
+          $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} |" -f `
             $rank,
             $row.Provider,
             $row.Model,
@@ -1236,7 +1411,8 @@ function New-MarkdownReport {
             $(if ($null -ne $row.OverallScore) { "{0:F2}" -f [double]$row.OverallScore } else { "n/a" }),
             $(if ($null -ne $row.SpeedScore) { "{0:F2}" -f [double]$row.SpeedScore } else { "n/a" }),
             $(if ($null -ne $row.AvgQualityScore) { "{0:F2}" -f [double]$row.AvgQualityScore } else { "n/a" }),
-            $(if ($null -ne $row.SuccessRate) { "{0:F2}" -f [double]$row.SuccessRate } else { "n/a" })))
+            $(if ($null -ne $row.SuccessRate) { "{0:F2}" -f [double]$row.SuccessRate } else { "n/a" }),
+            $(if ([string]::IsNullOrWhiteSpace($errCell)) { "—" } else { $errCell })))
             $rank++
         }
 
@@ -1264,10 +1440,10 @@ function New-MarkdownReport {
         $lines.Add("")
         $lines.Add("## Quality Breakdown")
         $lines.Add("")
-        $lines.Add("| Provider | Model | AvgQualityScore | ReasoningScore | JsonScore | CodingScore | InstructionScore | SummarizationScore |")
-        $lines.Add("|---|---|---:|---:|---:|---:|---:|---:|")
+        $lines.Add("| Provider | Model | AvgQualityScore | ReasoningScore | JsonScore | CodingScore | InstructionScore | SummarizationScore | ContextScore |")
+        $lines.Add("|---|---|---:|---:|---:|---:|---:|---:|---:|")
         foreach ($row in $Leaderboard) {
-            $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |" -f `
+            $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} |" -f `
                 $row.Provider,
                 $row.Model,
                 $(if ($null -ne $row.AvgQualityScore) { "{0:F2}" -f [double]$row.AvgQualityScore } else { "n/a" }),
@@ -1275,13 +1451,26 @@ function New-MarkdownReport {
                 $(if ($null -ne $row.JsonScore) { "{0:F2}" -f [double]$row.JsonScore } else { "n/a" }),
                 $(if ($null -ne $row.CodingScore) { "{0:F2}" -f [double]$row.CodingScore } else { "n/a" }),
                 $(if ($null -ne $row.InstructionScore) { "{0:F2}" -f [double]$row.InstructionScore } else { "n/a" }),
-                $(if ($null -ne $row.SummarizationScore) { "{0:F2}" -f [double]$row.SummarizationScore } else { "n/a" })))
+                $(if ($null -ne $row.SummarizationScore) { "{0:F2}" -f [double]$row.SummarizationScore } else { "n/a" }),
+                $(if ($null -ne $row.ContextScore) { "{0:F2}" -f [double]$row.ContextScore } else { "n/a" })))
         }
 
         $lines.Add("")
-        $bestOverall = $Leaderboard[0]
-        $fastest = $Leaderboard | Sort-Object WarmAvgTokensPerSec -Descending | Select-Object -First 1
-        $bestQuality = $Leaderboard | Sort-Object AvgQualityScore -Descending | Select-Object -First 1
+        $bestOverall = @($Leaderboard | Where-Object { $_.SuccessRate -gt 0 } | Select-Object -First 1)
+        if ($bestOverall.Count -eq 0) { $bestOverall = @($Leaderboard[0]) }
+        $bestOverall = $bestOverall[0]
+
+        $fastest = @($Leaderboard | Where-Object { $_.SuccessRate -gt 0 -and $null -ne $_.WarmAvgTokensPerSec } | Sort-Object WarmAvgTokensPerSec -Descending | Select-Object -First 1)
+        if ($fastest.Count -eq 0) {
+            $fastest = @($Leaderboard | Sort-Object WarmAvgTokensPerSec -Descending | Select-Object -First 1)
+        }
+        $fastest = $fastest[0]
+
+        $bestQuality = @($Leaderboard | Where-Object { $_.SuccessRate -gt 0 } | Sort-Object AvgQualityScore -Descending | Select-Object -First 1)
+        if ($bestQuality.Count -eq 0) {
+            $bestQuality = @($Leaderboard | Sort-Object AvgQualityScore -Descending | Select-Object -First 1)
+        }
+        $bestQuality = $bestQuality[0]
 
         $lines.Add("## Highlights")
         $lines.Add("")
@@ -1648,7 +1837,7 @@ $grouped = $results | Group-Object Provider, Model
 
 $summary = foreach ($g in $grouped) {
     $items = @($g.Group)
-    $startup = @($items | Where-Object { $_.TestId -eq "__startup__" -and $_.Success -eq $true })
+    $startupRow = @($items | Where-Object { $_.TestId -eq "__startup__" } | Select-Object -First 1)
     $warm = @($items | Where-Object { $_.TestId -ne "__startup__" })
     $warmSuccess = @($warm | Where-Object { $_.Success -eq $true })
 
@@ -1656,10 +1845,17 @@ $summary = foreach ($g in $grouped) {
 
     $initialLoadMs = $null
     $initialTotalMs = $null
-    if ($startup.Count -gt 0) {
-        $initialLoadMs = $startup[0].LoadMs
-        $initialTotalMs = $startup[0].TotalMs
+    if ($null -ne $startupRow) {
+        $initialLoadMs = $startupRow.LoadMs
+        $initialTotalMs = $startupRow.TotalMs
     }
+
+    $errParts = @(
+        @($items | Where-Object { -not $_.Success -and -not [string]::IsNullOrWhiteSpace($_.Error) } | ForEach-Object { $_.Error.Trim() }) |
+            Where-Object { $_ } |
+            Select-Object -Unique
+    )
+    $errorSummary = if ($errParts.Count -gt 0) { ($errParts -join " | ") } else { "" }
 
     $warmAvgTotalMs = $null
     if ($warmSuccess.Count -gt 0) {
@@ -1689,12 +1885,14 @@ $summary = foreach ($g in $grouped) {
     $codingItems = @($warm | Where-Object { $_.Category -eq "coding" -and $null -ne $_.QualityScore })
     $instructionItems = @($warm | Where-Object { $_.Category -eq "instruction" -and $null -ne $_.QualityScore })
     $summarizationItems = @($warm | Where-Object { $_.Category -eq "summarization" -and $null -ne $_.QualityScore })
+    $contextItems = @($warm | Where-Object { $_.Category -eq "context" -and $null -ne $_.QualityScore })
 
     $reasoningScore = if ($reasoningItems.Count -gt 0) { [Math]::Round((($reasoningItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
     $jsonScore = if ($jsonItems.Count -gt 0) { [Math]::Round((($jsonItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
     $codingScore = if ($codingItems.Count -gt 0) { [Math]::Round((($codingItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
     $instructionScore = if ($instructionItems.Count -gt 0) { [Math]::Round((($instructionItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
     $summarizationScore = if ($summarizationItems.Count -gt 0) { [Math]::Round((($summarizationItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
+    $contextScore = if ($contextItems.Count -gt 0) { [Math]::Round((($contextItems | Measure-Object -Property QualityScore -Average).Average), 2) } else { $null }
 
     [pscustomobject]@{
         Provider            = $items[0].Provider
@@ -1715,26 +1913,68 @@ $summary = foreach ($g in $grouped) {
         CodingScore         = $codingScore
         InstructionScore    = $instructionScore
         SummarizationScore  = $summarizationScore
+        ContextScore        = $contextScore
+        ErrorSummary        = $errorSummary
     }
 }
 
-$summary = @($summary | Where-Object { $_.SuccessRate -gt 0 })
+$summary = @($summary)
 
 $leaderboard = [System.Collections.Generic.List[object]]::new()
 
 if ($summary.Count -gt 0) {
-    $minTps = ($summary | Measure-Object -Property WarmAvgTokensPerSec -Minimum).Minimum
-    $maxTps = ($summary | Measure-Object -Property WarmAvgTokensPerSec -Maximum).Maximum
+    $scoredForNorm = @($summary | Where-Object { $_.SuccessRate -gt 0 })
 
-    $latencyCandidates = @($summary | Where-Object { $null -ne $_.WarmAvgTotalMs })
-    $minWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Minimum).Minimum } else { 0 }
-    $maxWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Maximum).Maximum } else { 1 }
+    if ($scoredForNorm.Count -gt 0) {
+        $minTps = ($scoredForNorm | Measure-Object -Property WarmAvgTokensPerSec -Minimum).Minimum
+        $maxTps = ($scoredForNorm | Measure-Object -Property WarmAvgTokensPerSec -Maximum).Maximum
 
-    $coldCandidates = @($summary | Where-Object { $null -ne $_.InitialTotalMs })
-    $minInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Minimum).Minimum } else { 0 }
-    $maxInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Maximum).Maximum } else { 1 }
+        $latencyCandidates = @($scoredForNorm | Where-Object { $null -ne $_.WarmAvgTotalMs })
+        $minWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Minimum).Minimum } else { 0 }
+        $maxWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Maximum).Maximum } else { 1 }
+
+        $coldCandidates = @($scoredForNorm | Where-Object { $null -ne $_.InitialTotalMs })
+        $minInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Minimum).Minimum } else { 0 }
+        $maxInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Maximum).Maximum } else { 1 }
+    }
+    else {
+        $minTps = 0.0
+        $maxTps = 1.0
+        $minWarmTotal = 0.0
+        $maxWarmTotal = 1.0
+        $minInitialTotal = 0.0
+        $maxInitialTotal = 1.0
+    }
 
     foreach ($s in $summary) {
+        if ($s.SuccessRate -le 0) {
+            $qualityScore = if ($null -ne $s.AvgQualityScore) { [double]$s.AvgQualityScore } else { 0.0 }
+            $leaderboard.Add([pscustomobject]@{
+                Provider            = $s.Provider
+                Model               = $s.Model
+                ModelSizeGB         = $s.ModelSizeGB
+                Params              = $s.Params
+                Quantization        = $s.Quantization
+                InitialLoadMs       = $s.InitialLoadMs
+                InitialTotalMs      = $s.InitialTotalMs
+                WarmAvgTotalMs      = $s.WarmAvgTotalMs
+                WarmAvgTokensPerSec = $s.WarmAvgTokensPerSec
+                SuccessRate         = $s.SuccessRate
+                AvgQualityScore     = $qualityScore
+                ReasoningScore      = $s.ReasoningScore
+                JsonScore           = $s.JsonScore
+                CodingScore         = $s.CodingScore
+                InstructionScore    = $s.InstructionScore
+                SummarizationScore  = $s.SummarizationScore
+                ContextScore        = $s.ContextScore
+                SpeedScore          = 0.0
+                ReliabilityScore    = 0.0
+                OverallScore        = 0.0
+                ErrorSummary        = $s.ErrorSummary
+            })
+            continue
+        }
+
         $throughputScore = Normalize-Score -Value $s.WarmAvgTokensPerSec -Min $minTps -Max $maxTps
 
         $warmLatencyScore = 50.0
@@ -1747,12 +1987,12 @@ if ($summary.Count -gt 0) {
             $startupScore = Normalize-Score -Value $s.InitialTotalMs -Min $minInitialTotal -Max $maxInitialTotal -Reverse
         }
 
-        $qualityScore = [double]$s.AvgQualityScore
+        $qualityScore = if ($null -ne $s.AvgQualityScore) { [double]$s.AvgQualityScore } else { 0.0 }
         $reliabilityScore = [double]$s.SuccessRate
 
         $speedScore = [Math]::Round((0.50 * $throughputScore) + (0.30 * $warmLatencyScore) + (0.20 * $startupScore), 2)
         $overallScore = [Math]::Round((0.75 * $qualityScore) + (0.15 * $speedScore) + (0.10 * $reliabilityScore), 2)
-      
+
         $leaderboard.Add([pscustomobject]@{
             Provider            = $s.Provider
             Model               = $s.Model
@@ -1770,9 +2010,11 @@ if ($summary.Count -gt 0) {
             CodingScore         = $s.CodingScore
             InstructionScore    = $s.InstructionScore
             SummarizationScore  = $s.SummarizationScore
+            ContextScore        = $s.ContextScore
             SpeedScore          = $speedScore
             ReliabilityScore    = $reliabilityScore
             OverallScore        = $overallScore
+            ErrorSummary        = $s.ErrorSummary
         })
     }
 }
@@ -1815,7 +2057,7 @@ Write-Host ""
 Write-Host "Quality Breakdown:" -ForegroundColor Green
 if ($leaderboard.Count -gt 0) {
     $leaderboard |
-    Select-Object Model, AvgQualityScore, ReasoningScore, JsonScore, CodingScore, InstructionScore, SummarizationScore, SpeedScore, ReliabilityScore, OverallScore |
+    Select-Object Model, AvgQualityScore, ReasoningScore, JsonScore, CodingScore, InstructionScore, SummarizationScore, ContextScore, SpeedScore, ReliabilityScore, OverallScore, ErrorSummary |
     Format-Table -AutoSize |
     Out-String -Width 9999 |
     Write-Host
@@ -1861,9 +2103,11 @@ Import-Csv $leaderboardCsv |
             CodingScore          = if ($_.CodingScore) { [double]$_.CodingScore } else { $null }
             InstructionScore     = if ($_.InstructionScore) { [double]$_.InstructionScore } else { $null }
             SummarizationScore   = if ($_.SummarizationScore) { [double]$_.SummarizationScore } else { $null }
+            ContextScore         = if ($_.ContextScore) { [double]$_.ContextScore } else { $null }
             SpeedScore           = if ($_.SpeedScore) { [double]$_.SpeedScore } else { $null }
             ReliabilityScore     = if ($_.ReliabilityScore) { [double]$_.ReliabilityScore } else { $null }
             OverallScore         = if ($_.OverallScore) { [double]$_.OverallScore } else { $null }
+            ErrorSummary         = $_.ErrorSummary
         }
     } |
     Sort-Object OverallScore -Descending |
