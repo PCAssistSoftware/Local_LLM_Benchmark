@@ -155,3 +155,6 @@ OverallScore = (0.75 * AvgQualityScore) + (0.15 * SpeedScore) + (0.10 * Reliabil
 ```powershell
 .\benchmark-local-llms.ps1 -Provider all -AutoDetectOllamaModels -AutoDetectLmsModels -Repeats 3 -TimeoutSec 600 -OutputDir .\results-all
 ```
+
+## Screenshots
+![Screenshot of results in console and gridview.](/screenshot.png)
