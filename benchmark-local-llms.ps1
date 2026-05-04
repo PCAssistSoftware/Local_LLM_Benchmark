@@ -21,7 +21,7 @@ It measures:
 - optional quality scores
 - category-level quality scores
 
-SpeedScore min/max normalization uses only models with warm SuccessRate > 0 so total failures do not skew relative speed ranking.
+SpeedScore is computed from fixed absolute targets (not run min/max), so scores stay comparable across different benchmark runs.
 
 Results are written to:
 - raw-results.json
@@ -888,21 +888,25 @@ function Get-QualityScore {
     }
 }
 
-function Normalize-Score {
+function Score-AgainstTarget {
     param(
         [double]$Value,
-        [double]$Min,
-        [double]$Max,
-        [switch]$Reverse
+        [double]$Target,
+        [switch]$HigherIsBetter
     )
 
-    if ($Max -le $Min) { return 100.0 }
+    if ($Target -le 0) { return 0.0 }
+    if ($Value -le 0) { return 0.0 }
 
-    $norm = (($Value - $Min) / ($Max - $Min)) * 100.0
-    if ($Reverse) { $norm = 100.0 - $norm }
+    $raw = if ($HigherIsBetter) {
+        ($Value / $Target) * 100.0
+    }
+    else {
+        ($Target / $Value) * 100.0
+    }
 
-    $norm = [Math]::Max(0.0, [Math]::Min(100.0, $norm))
-    [Math]::Round($norm, 2)
+    $clamped = [Math]::Max(0.0, [Math]::Min(100.0, $raw))
+    return [Math]::Round($clamped, 2)
 }
 
 function Get-InstalledOllamaModels {
@@ -1923,28 +1927,10 @@ $summary = @($summary)
 $leaderboard = [System.Collections.Generic.List[object]]::new()
 
 if ($summary.Count -gt 0) {
-    $scoredForNorm = @($summary | Where-Object { $_.SuccessRate -gt 0 })
-
-    if ($scoredForNorm.Count -gt 0) {
-        $minTps = ($scoredForNorm | Measure-Object -Property WarmAvgTokensPerSec -Minimum).Minimum
-        $maxTps = ($scoredForNorm | Measure-Object -Property WarmAvgTokensPerSec -Maximum).Maximum
-
-        $latencyCandidates = @($scoredForNorm | Where-Object { $null -ne $_.WarmAvgTotalMs })
-        $minWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Minimum).Minimum } else { 0 }
-        $maxWarmTotal = if ($latencyCandidates.Count -gt 0) { ($latencyCandidates | Measure-Object -Property WarmAvgTotalMs -Maximum).Maximum } else { 1 }
-
-        $coldCandidates = @($scoredForNorm | Where-Object { $null -ne $_.InitialTotalMs })
-        $minInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Minimum).Minimum } else { 0 }
-        $maxInitialTotal = if ($coldCandidates.Count -gt 0) { ($coldCandidates | Measure-Object -Property InitialTotalMs -Maximum).Maximum } else { 1 }
-    }
-    else {
-        $minTps = 0.0
-        $maxTps = 1.0
-        $minWarmTotal = 0.0
-        $maxWarmTotal = 1.0
-        $minInitialTotal = 0.0
-        $maxInitialTotal = 1.0
-    }
+    # Absolute speed targets keep SpeedScore stable between different runs.
+    $targetWarmTps = 120.0
+    $targetWarmTotalMs = 1000.0
+    $targetInitialTotalMs = 10000.0
 
     foreach ($s in $summary) {
         if ($s.SuccessRate -le 0) {
@@ -1975,16 +1961,16 @@ if ($summary.Count -gt 0) {
             continue
         }
 
-        $throughputScore = Normalize-Score -Value $s.WarmAvgTokensPerSec -Min $minTps -Max $maxTps
+        $throughputScore = Score-AgainstTarget -Value $s.WarmAvgTokensPerSec -Target $targetWarmTps -HigherIsBetter
 
         $warmLatencyScore = 50.0
         if ($null -ne $s.WarmAvgTotalMs) {
-            $warmLatencyScore = Normalize-Score -Value $s.WarmAvgTotalMs -Min $minWarmTotal -Max $maxWarmTotal -Reverse
+            $warmLatencyScore = Score-AgainstTarget -Value $s.WarmAvgTotalMs -Target $targetWarmTotalMs
         }
 
         $startupScore = 50.0
         if ($null -ne $s.InitialTotalMs) {
-            $startupScore = Normalize-Score -Value $s.InitialTotalMs -Min $minInitialTotal -Max $maxInitialTotal -Reverse
+            $startupScore = Score-AgainstTarget -Value $s.InitialTotalMs -Target $targetInitialTotalMs
         }
 
         $qualityScore = if ($null -ne $s.AvgQualityScore) { [double]$s.AvgQualityScore } else { 0.0 }
