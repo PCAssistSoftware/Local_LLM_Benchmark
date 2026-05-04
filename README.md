@@ -63,7 +63,7 @@ The v2 benchmark includes 22 warm prompts total:
 | Column | Description |
 |---|---|
 | `SuccessRate` | Percentage of warm runs (excludes startup row) that completed without runtime error. |
-| `SpeedScore` | Normalized 0-100 speed score, relative to models in the same run with warm `SuccessRate > 0`. |
+| `SpeedScore` | Absolute 0-100 speed score from fixed targets (not relative to other models in the run). |
 | `ReliabilityScore` | Equal to `SuccessRate` for normally scored rows; 0 for all-warm-failure rows. |
 | `OverallScore` | Weighted composite of quality, speed, and reliability. |
 | `ErrorSummary` | Distinct non-empty error messages for that provider/model across failed rows, concatenated with ` | `. |
@@ -99,13 +99,23 @@ All outputs are normalized before scoring: ANSI escapes, `<think>...</think>` bl
 
 ### SpeedScore
 
-Normalized 0-100:
+Absolute 0-100 score using fixed targets:
 
 - 50% warm tokens/sec (higher is better)
 - 30% warm average latency (lower is better)
 - 20% cold-start total time (`InitialTotalMs`, lower is better)
 
-Min/max for each component are computed from rows with warm `SuccessRate > 0`, so all-failure rows do not distort scaling.
+Component formulas:
+
+```text
+throughputScore  = clamp((WarmAvgTokensPerSec / 120) * 100, 0, 100)
+warmLatencyScore = clamp((1000 / WarmAvgTotalMs) * 100, 0, 100)
+startupScore     = clamp((10000 / InitialTotalMs) * 100, 0, 100)
+```
+
+```text
+SpeedScore = (0.50 * throughputScore) + (0.30 * warmLatencyScore) + (0.20 * startupScore)
+```
 
 ### ReliabilityScore
 
@@ -120,8 +130,8 @@ OverallScore = (0.75 * AvgQualityScore) + (0.15 * SpeedScore) + (0.10 * Reliabil
 
 ## Notes
 
-- `SpeedScore` is relative to the current run composition; adding/removing models shifts it.
-- For stable absolute comparisons, prefer raw metrics (`WarmAvgTokensPerSec`, `WarmAvgTotalMs`, `InitialTotalMs`, `SuccessRate`).
+- `SpeedScore` is absolute and comparable across runs as long as the fixed targets remain unchanged.
+- Raw metrics (`WarmAvgTokensPerSec`, `WarmAvgTotalMs`, `InitialTotalMs`, `SuccessRate`) remain the most transparent values for direct comparison.
 - JSON and instruction prompts in v2 are intentionally stricter to improve model separation.
 
 ## Example usage
